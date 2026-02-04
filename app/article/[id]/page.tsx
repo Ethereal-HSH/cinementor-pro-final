@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 
 interface Paragraph {
@@ -11,6 +12,7 @@ interface Paragraph {
   translation: string | null;
   show?: boolean;
   loading?: boolean;
+  isImage?: boolean; // 新增：标识是否为图片
 }
 
 export default function ArticlePage() {
@@ -26,6 +28,61 @@ export default function ArticlePage() {
     vocab_md: string;
     long_sentences_md: string;
   } | null>(null);
+
+  const normalizeImageSrc = (src: string) => {
+    const s = (src || "").trim();
+    const decoded = s
+      .replace(/&amp;/g, "&")
+      .replace(/&#38;/g, "&")
+      .replace(/&#x26;/gi, "&");
+    const t = decoded.replace(/[)\]]+$/g, "");
+    if (decoded.startsWith("//")) return "https:" + decoded;
+    if (/^https?:\/\//i.test(t)) return t;
+    return "https://" + t.replace(/^\/+/, "");
+  };
+
+  const parseImageMarkdown = (p: string) => {
+    const m = p.match(/^!\[(.*?)\]\(([^)]+)\)/);
+    if (!m) return null;
+    const alt = m[1] || "";
+    const src = normalizeImageSrc(m[2] || "");
+    return { alt, src };
+  };
+
+  const proxifyImage = (src: string) => {
+    try {
+      const u = new URL(src);
+      const host = u.hostname;
+      const needProxy = ['i.guim.co.uk','media.guim.co.uk','static.guim.co.uk','assets.guim.co.uk'].some(h => host.endsWith(h));
+      if (needProxy) {
+        return `/api/proxy-image?url=${encodeURIComponent(src)}`;
+      }
+      return src;
+    } catch {
+      return src;
+    }
+  };
+
+  const cleanupParas = (arr: string[]) => {
+    const cleaned = arr
+      .map(s => s.replace(/\s+\n/g, "\n").trim())
+      .map(s => s.replace(/\[View image in fullscreen\]\(#img-\d+\)/gi, ""))
+      .map(s => s.replace(/Photograph:\s+[^\n]+/gi, ""))
+      .map(s => s.replace(/!?\[([^\]]+)\]\(([^)]+)\)/g, (full, txt) => full.startsWith('!') ? full : txt)) // 链接转纯文本，保留图片
+      .filter(s => s.length > 0 && !/^Share this|Sign up|Support the Guardian/i.test(s))
+      .filter(s => !/Explore more on these topics|Reuse this content|mailto:/i.test(s));
+    // 去重
+    const set = new Set<string>();
+    const unique: string[] = [];
+    for (const s of cleaned) {
+      const key = s.replace(/\s+/g, " ").toLowerCase();
+      if (!set.has(key)) {
+        set.add(key);
+        unique.push(s);
+      }
+    }
+    return unique;
+  };
 
   useEffect(() => {
     if (id) {
@@ -52,18 +109,53 @@ export default function ArticlePage() {
       setTitle(data.title);
       setSource(data.source);
 
-      // 处理内容，拆分段落和句子
-      const content = data.content || "";
-      const rawParas = content.split(/\n\n+/).filter((p: string) => p.trim().length > 0);
+      // 优先使用 raw_markdown，如果为空则回退到 content
+      let content = data.raw_markdown || data.content || "";
       
-      const processedParas = rawParas.map((p: string, idx: number) => ({
-        id: `para-${idx}`,
-        original: p,
-        sentences: splitIntoSentences(p),
-        translation: null,
-        show: false,
-        loading: false
-      }));
+      // 如果两者都为空或太短，尝试实时抓取
+      if (!content || content.length < 500) {
+        try {
+          const res = await fetch("/api/read", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: data.original_url, article_id: articleId })
+          });
+          const rd = await res.json();
+          const fetched = rd.content || "";
+          if (fetched && fetched.length > 0) {
+            content = fetched;
+          }
+        } catch (e) {
+          console.warn("On-demand content fetch failed", e);
+        }
+      }
+      
+      const rawParas = cleanupParas(content.split(/\n\n+/).filter((p: string) => p.trim().length > 0));
+      
+      const processedParas = rawParas.map((p: string, idx: number) => {
+        const img = parseImageMarkdown(p);
+        if (img) {
+          return {
+            id: `para-${idx}`,
+            original: p,
+            sentences: [img.src],
+            translation: img.alt,
+            show: true,
+            loading: false,
+            isImage: true
+          };
+        }
+
+        return {
+            id: `para-${idx}`,
+            original: p,
+            sentences: splitIntoSentences(p),
+            translation: null,
+            show: false,
+            loading: false,
+            isImage: false
+        };
+      });
 
       setParagraphs(processedParas);
 
@@ -116,6 +208,8 @@ export default function ArticlePage() {
 
   const handleToggleParagraph = async (idx: number) => {
     const para = paragraphs[idx];
+    if (para.isImage) return; // 图片无需翻译
+
     if (para.translation) {
       setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, show: !p.show } : p));
       return;
@@ -146,6 +240,19 @@ export default function ArticlePage() {
     <main className="max-w-6xl mx-auto px-6 py-10 font-serif grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-12">
       <section>
         <header className="mb-10">
+          <div className="mb-4">
+            <Link
+              href="/"
+              aria-label="返回主界面"
+              title="返回主界面"
+              className="inline-flex items-center justify-center w-8 h-8 rounded-full text-gray-400 hover:text-black focus:outline-none focus-visible:ring-1 focus-visible:ring-gold"
+            >
+              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M15 6l-6 6 6 6" />
+                <path d="M3 12h12" />
+              </svg>
+            </Link>
+          </div>
           <div className="text-sm text-gray-500 mb-2 uppercase tracking-widest">{source}</div>
           <h1 className="text-4xl font-bold mb-8 leading-tight text-gray-900">{title}</h1>
           
@@ -157,45 +264,69 @@ export default function ArticlePage() {
         <article className="prose prose-lg prose-gray max-w-none">
           {paragraphs.map((para, idx) => (
             <div key={para.id} className="mb-8 group">
-              <p className="leading-loose text-gray-900 mb-3">
-                {para.sentences.map((s, sIdx) => (
-                  <span
-                    key={sIdx}
-                    className={`cursor-pointer transition duration-200 rounded px-1 -mx-1 
-                      ${selectedSentence === s ? 'bg-yellow-200' : 'hover:bg-yellow-100'}`}
-                    onClick={() => handleAnalyze(s)}
-                  >
-                    {s}{" "}
-                  </span>
-                ))}
-              </p>
-              <div className="mb-2">
-                <button
-                  aria-label={para.loading ? "译文生成中..." : (para.show ? "隐藏该段译文" : "翻译该段")}
-                  title={para.loading ? "译文生成中..." : (para.show ? "隐藏该段译文" : "翻译该段")}
-                  className={`inline-flex items-center justify-center w-6 h-6 rounded-full transition-opacity transition-transform duration-200 opacity-0 group-hover:opacity-100 group-hover:translate-y-0 translate-y-1 focus:outline-none focus-visible:ring-1 focus-visible:ring-gold ${para.loading ? 'cursor-wait' : ''} ${para.show ? 'text-gold' : 'text-gray-500'} hover:text-ink`}
-                  onClick={() => handleToggleParagraph(idx)}
-                  disabled={para.loading}
-                >
-                  {para.loading ? (
-                    <svg viewBox="0 0 24 24" className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <circle cx="12" cy="12" r="9" opacity="0.25" />
-                      <path d="M12 3a9 9 0 0 1 9 9" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <path d="M20 3c-3 0-6 1.5-8 3.5L6 12l-2 6 6-2 5.5-6c2-2 3.5-5 3.5-8z" />
-                      <path d="M14 7l3 3" />
-                      <path d="M6 12l6 6" />
-                    </svg>
+              {para.isImage ? (
+                  <figure className="my-6">
+                      <img 
+                        src={proxifyImage(normalizeImageSrc(para.sentences[0]))} 
+                        alt={para.translation || "Article Image"} 
+                        className="w-full min-h-[200px] bg-gray-100 rounded-lg shadow-md"
+                        loading="lazy"
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                          const placeholder = e.currentTarget.nextElementSibling;
+                          if (placeholder instanceof HTMLElement) {
+                            placeholder.style.display = 'flex';
+                          }
+                        }}
+                      />
+                      <div style={{display:'none'}} className="w-full min-h-[200px] bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 text-sm">
+                        图片加载失败
+                      </div>
+                      {para.translation && <figcaption className="text-center text-sm text-gray-500 mt-2">{para.translation}</figcaption>}
+                  </figure>
+              ) : (
+                <>
+                  <p className="leading-loose text-gray-900 mb-3">
+                    {para.sentences.map((s, sIdx) => (
+                      <span
+                        key={sIdx}
+                        className={`cursor-pointer transition duration-200 rounded px-1 -mx-1 
+                          ${selectedSentence === s ? 'bg-yellow-200' : 'hover:bg-yellow-100'}`}
+                        onClick={() => handleAnalyze(s)}
+                      >
+                        {s}{" "}
+                      </span>
+                    ))}
+                  </p>
+                  <div className="mb-2">
+                    <button
+                      aria-label={para.loading ? "译文生成中..." : (para.show ? "隐藏该段译文" : "翻译该段")}
+                      title={para.loading ? "译文生成中..." : (para.show ? "隐藏该段译文" : "翻译该段")}
+                      className={`inline-flex items-center justify-center w-6 h-6 rounded-full transition-opacity transition-transform duration-200 opacity-0 group-hover:opacity-100 group-hover:translate-y-0 translate-y-1 focus:outline-none focus-visible:ring-1 focus-visible:ring-gold ${para.loading ? 'cursor-wait' : ''} ${para.show ? 'text-gold' : 'text-gray-500'} hover:text-ink`}
+                      onClick={() => handleToggleParagraph(idx)}
+                      disabled={para.loading}
+                    >
+                      {para.loading ? (
+                        <svg viewBox="0 0 24 24" className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <circle cx="12" cy="12" r="9" opacity="0.25" />
+                          <path d="M12 3a9 9 0 0 1 9 9" />
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <path d="M20 3c-3 0-6 1.5-8 3.5L6 12l-2 6 6-2 5.5-6c2-2 3.5-5 3.5-8z" />
+                          <path d="M14 7l3 3" />
+                          <path d="M6 12l6 6" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                  
+                  {para.show && (
+                    <div className={`mt-2 p-4 bg-gray-50 rounded border border-gray-100 text-gray-700 text-base leading-relaxed transition-opacity duration-500 ${para.translation ? 'opacity-100' : 'opacity-50'}`}>
+                      {para.translation || (para.loading ? "译文生成中..." : "暂无译文")}
+                    </div>
                   )}
-                </button>
-              </div>
-              
-              {para.show && (
-                <div className={`mt-2 p-4 bg-gray-50 rounded border border-gray-100 text-gray-700 text-base leading-relaxed transition-opacity duration-500 ${para.translation ? 'opacity-100' : 'opacity-50'}`}>
-                  {para.translation || (para.loading ? "译文生成中..." : "暂无译文")}
-                </div>
+                </>
               )}
             </div>
           ))}

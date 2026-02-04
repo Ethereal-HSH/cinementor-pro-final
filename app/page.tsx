@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow, format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 
 interface Article {
@@ -18,6 +18,8 @@ export default function HomePage() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const SOURCE_ORDER = ["The Guardian","The Conversation","CNBC Technology","Aeon Essays"];
+  const [activeSource, setActiveSource] = useState<string>(SOURCE_ORDER[0]);
 
   useEffect(() => {
     fetchArticles();
@@ -72,12 +74,25 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* 文章列表 */}
       <section>
-        <div className="flex items-center justify-between mb-8 border-b border-gray-200 pb-4">
-            <h2 className="text-2xl font-bold">最新推荐</h2>
+        <div className="flex items-center justify-between mb-6">
+            <div className="flex flex-wrap gap-2">
+              {SOURCE_ORDER.map(src => {
+                const count = articles.filter(a => a.source === src).length;
+                const active = activeSource === src;
+                return (
+                  <button
+                    key={src}
+                    onClick={() => setActiveSource(src)}
+                    className={`px-3 py-1.5 rounded-full text-sm font-sans border transition ${active ? 'bg-black text-white border-black' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400'}`}
+                  >
+                    {src} {count > 0 ? `(${count})` : ''}
+                  </button>
+                );
+              })}
+            </div>
             <span className="text-sm text-gray-500 font-sans">
-                {articles.length > 0 ? `已更新 ${articles.length} 篇` : "暂无文章"}
+              {articles.length > 0 ? `已更新 ${articles.length} 篇` : "暂无文章"}
             </span>
         </div>
 
@@ -92,31 +107,41 @@ export default function HomePage() {
             </div>
         ) : (
             <div className="space-y-8">
-                {articles.map((article) => (
-                    <article key={article.id} className="group cursor-pointer">
+                {articles.filter(a => a.source === activeSource).length === 0 ? (
+                  <div className="text-center py-16 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                    <p className="text-gray-500">该来源暂无文章</p>
+                  </div>
+                ) : (
+                  articles
+                    .filter(a => a.source === activeSource)
+                    .map(article => (
+                      <article key={article.id} className="group cursor-pointer">
                         <Link href={`/article/${article.id}`} className="block p-6 border border-gray-100 rounded-xl hover:border-gray-300 hover:shadow-sm transition bg-white">
-                            <div className="flex flex-col md:flex-row gap-4 md:items-start justify-between mb-3">
-                                <h3 className="text-2xl font-semibold leading-tight group-hover:text-blue-900 transition flex-1">
-                                    {article.title}
-                                </h3>
-                                <span className="inline-block px-2 py-1 bg-gray-100 text-xs text-gray-600 rounded font-sans whitespace-nowrap">
-                                    {article.source}
-                                </span>
-                            </div>
-                            
-                            <div className="flex items-center gap-4 text-sm text-gray-500 font-sans mt-4">
-                                <span>
-                                    {formatDistanceToNow(new Date(article.published_at), { addSuffix: true, locale: zhCN })}
-                                </span>
-                                {article.status === 'read' && (
-                                    <span className="text-green-600 flex items-center gap-1">
-                                        ✓ 已读
-                                    </span>
-                                )}
-                            </div>
+                          <h4 className="text-lg font-semibold leading-tight group-hover:text-blue-900 transition">
+                            {article.title}
+                          </h4>
+                          <div className="flex items-center gap-4 text-sm text-gray-500 font-sans mt-3">
+                            <span className="whitespace-nowrap">
+                              {format(new Date(article.published_at), "yyyy-MM-dd")}
+                            </span>
+                            <span className="whitespace-nowrap">
+                              {formatDistanceToNow(new Date(article.published_at), { addSuffix: true, locale: zhCN })}
+                            </span>
+                            {Date.now() - new Date(article.published_at).getTime() < 2 * 24 * 60 * 60 * 1000 && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded bg-green-100 text-green-700 text-xs font-medium">
+                                New
+                              </span>
+                            )}
+                            {article.status === 'read' && (
+                              <span className="text-green-600 flex items-center gap-1">
+                                ✓ 已读
+                              </span>
+                            )}
+                          </div>
                         </Link>
-                    </article>
-                ))}
+                      </article>
+                    ))
+                )}
 
                 {articles.length === 0 && (
                     <div className="text-center py-20 bg-gray-50 rounded-lg border border-dashed border-gray-300">
