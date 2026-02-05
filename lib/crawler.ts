@@ -215,14 +215,7 @@ function htmlToMarkdown(html: string) {
     return url ? 'https://' + url.replace(/^\/+/, '') : '';
   };
 
-  s = s.replace(/<picture[\s\S]*?<\/picture>/gi, (m) => {
-    const srcsetMatch = m.match(/<source[^>]*srcset=["']([^"']+)["'][^>]*>/i);
-    const altMatch = m.match(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*>/i);
-    const src = srcsetMatch ? pickFromSrcset(srcsetMatch[1]) : '';
-    const alt = altMatch ? altMatch[1] : '';
-    if (!src) return '';
-    return `![${alt}](${src})\n\n`;
-  });
+  // Handle <figure> first, because it might contain <picture> or <img>
   s = s.replace(/<figure[\s\S]*?<\/figure>/gi, (m) => {
     const imgMatch = m.match(/<img[^>]*src=["']([^"']+)["'][^>]*alt=["']?([^"'>]*)["']?[^>]*>/i)
       || m.match(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*src=["']([^"']+)["'][^>]*>/i);
@@ -261,6 +254,15 @@ function htmlToMarkdown(html: string) {
     const cap = capMatch ? capMatch[1] : '';
     if (!src) return '';
     return `![${alt}](${src})\n\n${cap ? `${cap}\n\n` : ''}`;
+  });
+
+  s = s.replace(/<picture[\s\S]*?<\/picture>/gi, (m) => {
+    const srcsetMatch = m.match(/<source[^>]*srcset=["']([^"']+)["'][^>]*>/i);
+    const altMatch = m.match(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*>/i);
+    const src = srcsetMatch ? pickFromSrcset(srcsetMatch[1]) : '';
+    const alt = altMatch ? altMatch[1] : '';
+    if (!src) return '';
+    return `![${alt}](${src})\n\n`;
   });
 
   s = s.replace(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*src=["']([^"'>]+)["'][^>]*>/gi, (_m, alt, src) => {
