@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { decodeHTMLEntities } from "@/lib/utils";
 
 interface Paragraph {
   id: string;
@@ -142,7 +143,7 @@ export default function ArticlePage() {
             id: `para-${idx}`,
             original: p,
             sentences: [img.src],
-            translation: img.alt,
+            translation: decodeHTMLEntities(img.alt),
             show: true,
             loading: false,
             isImage: true,
@@ -155,7 +156,7 @@ export default function ArticlePage() {
         return {
             id: `para-${idx}`,
             original: p,
-            sentences: splitIntoSentences(p),
+            sentences: splitIntoSentences(decodeHTMLEntities(p)),
             translation: null,
             show: false,
             loading: false,
@@ -287,7 +288,7 @@ export default function ArticlePage() {
             </Link>
           </div>
           <div className="text-sm text-gray-500 mb-2 uppercase tracking-widest">{source}</div>
-          <h1 className="text-4xl font-bold mb-8 leading-tight text-gray-900">{title}</h1>
+          <h1 className="text-4xl font-bold mb-8 leading-tight text-gray-900">{decodeHTMLEntities(title || "")}</h1>
           
           <div className="flex items-center justify-between border-b border-gray-200 pb-4 mb-6">
              <span className="text-sm text-gray-500">共 {paragraphs.length} 个段落</span>
@@ -409,15 +410,15 @@ export default function ArticlePage() {
                   <div className="space-y-6">
                     <div>
                       <h4 className="text-lg font-semibold mb-2">四段式中英对照</h4>
-                      <div className="whitespace-pre-wrap">{fullAnalysis.translation_md}</div>
+                      <div className="whitespace-pre-wrap">{decodeHTMLEntities(fullAnalysis.translation_md)}</div>
                     </div>
                     <div>
                       <h4 className="text-lg font-semibold mb-2">考点词汇辨析</h4>
-                      <div className="whitespace-pre-wrap">{fullAnalysis.vocab_md}</div>
+                      <div className="whitespace-pre-wrap">{decodeHTMLEntities(fullAnalysis.vocab_md)}</div>
                     </div>
                     <div>
                       <h4 className="text-lg font-semibold mb-2">长难句拆解</h4>
-                      <div className="whitespace-pre-wrap">{fullAnalysis.long_sentences_md}</div>
+                      <div className="whitespace-pre-wrap">{decodeHTMLEntities(fullAnalysis.long_sentences_md)}</div>
                     </div>
                   </div>
                 ) : (
@@ -429,7 +430,7 @@ export default function ArticlePage() {
               </div>
             ) : (
                 <div className="prose prose-sm prose-p:text-gray-600 prose-headings:font-bold prose-headings:text-black">
-                    <div className="whitespace-pre-wrap">{analysis || "分析中..."}</div>
+                    <div className="whitespace-pre-wrap">{analysis ? decodeHTMLEntities(analysis) : "分析中..."}</div>
                 </div>
             )}
           </div>

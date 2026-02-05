@@ -39,7 +39,8 @@ export async function POST(req: Request) {
 
 ### 📚 考点词汇
 - **{单词/短语}**: {简明释义} ({近义词/用法辨析})
-...`
+请输出纯文本字符，不要使用 HTML 实体编码。
+Please output plain text characters. Do not use HTML entities like &#x27; for punctuation.`
             },
             { role: "user", content: sentence }
           ],

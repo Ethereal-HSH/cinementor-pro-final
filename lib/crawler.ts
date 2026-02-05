@@ -54,6 +54,13 @@ function sanitizeUrl(u: string) {
   return (u || "").trim().replace(/[)\]]+$/g, "");
 }
 
+function decodeUrlEntities(u: string) {
+  return (u || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&#38;/g, '&')
+    .replace(/&#x26;/gi, '&');
+}
+
 function selectorFor(url: string, source: string) {
   let host = "";
   try { host = new URL(url).hostname; } catch {}
@@ -209,7 +216,7 @@ function htmlToMarkdown(html: string) {
         bestUrl = candidate;
       }
     }
-    const url = bestUrl || '';
+    const url = decodeUrlEntities(bestUrl || '');
     if (url.startsWith('//')) return 'https:' + url;
     if (/^https?:\/\//i.test(url)) return url;
     return url ? 'https://' + url.replace(/^\/+/, '') : '';
@@ -244,6 +251,7 @@ function htmlToMarkdown(html: string) {
     if (dmvsMatch && !src) {
       src = dmvsMatch[1];
     }
+    src = decodeUrlEntities(src);
     if (src && src.startsWith('//')) {
       src = 'https:' + src;
     }
@@ -266,9 +274,9 @@ function htmlToMarkdown(html: string) {
   });
 
   s = s.replace(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*src=["']([^"'>]+)["'][^>]*>/gi, (_m, alt, src) => {
-    let url = src || '';
+    let url = decodeUrlEntities(src || '');
     const dmvs = (_m.match(/data-media-viewer-src=["']([^"']+)["']/i) || [])[1];
-    if (dmvs) url = dmvs;
+    if (dmvs) url = decodeUrlEntities(dmvs);
     if (url.startsWith('//')) url = 'https:' + url;
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
     return `![${alt || ''}](${url})\n\n`;
@@ -368,6 +376,10 @@ async function domainFallbackMarkdown(url: string) {
 function normalizeMarkdownSource(md: string, source: string) {
   let s = (md || '').replace(/\r/g, '');
   if (source === 'The Guardian') {
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt, url) => {
+      const u = decodeUrlEntities(String(url || '').trim());
+      return `![${alt || ''}](${u})`;
+    });
     s = s
       .replace(/\[View image in fullscreen\]\(#img-\d+\)/gi, '')
       .replace(/Photograph:\s+[^\n]+/gi, '')
@@ -392,6 +404,19 @@ function normalizeMarkdownSource(md: string, source: string) {
 
 export function cleanContent(text: string, url?: string) {
   return text;
+}
+
+export async function fetchArticleMarkdown(url: string, source: string) {
+  const sel = selectorFor(url, source);
+  let { markdown, title } = await fetchRawMarkdown(url, sel);
+  if (!isContentValid(markdown, source)) {
+    const fb = await domainFallbackMarkdown(url);
+    markdown = fb;
+  }
+  if (!isContentValid(markdown, source)) {
+    return { markdown: "", title: title || "" };
+  }
+  return { markdown: normalizeMarkdownSource(markdown, source), title: title || "" };
 }
 
 export async function fetchAndStoreArticles() {
