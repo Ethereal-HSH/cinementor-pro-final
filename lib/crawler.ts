@@ -73,7 +73,19 @@ function isContentValid(markdown: string, source: string) {
 
 async function fetchFeedWithSnapshot(url: string) {
   const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const res = await fetch(url, { headers: { 'User-Agent': ua, 'Accept': 'application/xml,text/xml,application/rss+xml' } });
+  let res;
+  try {
+    res = await fetch(url, { headers: { 'User-Agent': ua, 'Accept': 'application/xml,text/xml,application/rss+xml' } });
+  } catch (e) {
+    console.log(`[Feed Snapshot] Direct fetch failed: ${e}`);
+  }
+
+  if (!res || !res.ok) {
+    console.log(`[Feed Snapshot] Direct fetch status=${res?.status}, trying proxy...`);
+    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    res = await fetch(proxyUrl);
+  }
+
   const body = await res.text().catch(() => '');
   const snap = body.slice(0, 200);
   if (!res.ok) {
@@ -120,7 +132,19 @@ async function fetchRawMarkdown(url: string, selector?: string): Promise<{ markd
 
 async function fetchHtml(url: string) {
   const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const res = await fetch(url, { headers: { 'User-Agent': ua, 'Accept': 'text/html' } });
+  let res;
+  try {
+    res = await fetch(url, { headers: { 'User-Agent': ua, 'Accept': 'text/html' } });
+  } catch (e) {
+    console.log(`[HTML Snapshot] Direct fetch failed: ${e}`);
+  }
+
+  if (!res || !res.ok) {
+     console.log(`[HTML Snapshot] Direct fetch status=${res?.status}, trying proxy...`);
+     const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+     res = await fetch(proxyUrl);
+  }
+
   const text = await res.text().catch(() => '');
   console.log(`[HTML Snapshot] ${url} status=${res.status} ${text.slice(0, 200)}`);
   if (!res.ok) return '';
@@ -291,37 +315,78 @@ export async function fetchAndStoreArticles() {
     try {
       const feed = await fetchFeedWithSnapshot(source.url);
       const items = feed.items || [];
+      // 1. 映射并解析日期，确保 valid items
       const candidates = items.map(item => {
         let link = (item as any).link;
         if (!link && typeof item === 'object' && 'links' in item) {
           link = (item as any).links?.[0]?.href;
         }
         if (!link) link = (item as any).guid || (item as any).id;
-        return { ...item, link: sanitizeUrl(String(link || '')) };
-      }).filter(i => i.link && /^https?:\/\//.test(i.link));
+        
+        // 解析发布时间，用于排序
+        const pubStr = (item as any).isoDate || (item as any).pubDate || new Date().toISOString();
+        const pubTime = new Date(pubStr).getTime();
+
+        return { 
+          ...item, 
+          link: sanitizeUrl(String(link || '')),
+          _pubTime: pubTime,
+          _pubStr: pubStr 
+        };
+      })
+      .filter(i => i.link && /^https?:\/\//.test(i.link))
+      // 2. 按日期降序排序（新文章在前）
+      .sort((a, b) => b._pubTime - a._pubTime);
+
+      if (candidates.length > 0) {
+        const newest = new Date(candidates[0]._pubTime).toISOString();
+        const oldest = new Date(candidates[candidates.length - 1]._pubTime).toISOString();
+        console.log(`[${source.name}] Candidates: ${candidates.length}, Date Range: ${newest} ~ ${oldest}`);
+      }
+
       const links = candidates.map(c => c.link);
       const { data: existingData } = await supabase
         .from('articles')
         .select('original_url')
         .in('original_url', links);
       const existingLinks = new Set(existingData?.map(e => e.original_url) || []);
+      
+      // 3. 排除已存在的，剩下的即为“新文章”（相对于DB）
+      // 由于已经按日期降序，这里得到的 newItems 依然是新->旧的顺序
+      // 我们将从前往后取，直到满足 quota。这意味着：
+      // - 如果有今天的新闻，优先取今天的。
+      // - 如果今天的都存过了，会自动往后取昨天的、前天的...
+      // - 从而实现“优先新文章，不足时用旧文章填补”
       const newItems = candidates.filter(c => !existingLinks.has(c.link));
+      
       let successCount = 0;
       for (const item of newItems) {
         if (successCount >= quota) break;
         const sel = selectorFor(item.link, source.name);
         let { markdown, title: jinaTitle } = await fetchRawMarkdown(item.link, sel);
+        
         if (!isContentValid(markdown, source.name)) {
+          console.log(`[${source.name}] Jina invalid (len=${markdown?.length}), trying fallback...`);
           const fb = await domainFallbackMarkdown(item.link);
           markdown = fb;
+          
           if (!isContentValid(markdown, source.name)) {
-            continue;
+            console.log(`[${source.name}] HTML fallback invalid (len=${markdown?.length}), trying RSS content...`);
+            const rssContent = (item as any).contentEncoded || (item as any).content || "";
+            if (rssContent) {
+              markdown = htmlToMarkdown(rssContent);
+            }
+            
+            if (!isContentValid(markdown, source.name)) {
+              console.log(`[${source.name}] All methods failed for ${item.link} (final len=${markdown?.length})`);
+              continue;
+            }
           }
         }
         const title = jinaTitle || (item as any).title || 'Untitled';
         const summaryBase = ((item as any).contentSnippet || (item as any).content || '') as string;
         const summary = summaryBase ? summaryBase.slice(0, 200) : '';
-        const published_at = (item as any).isoDate || (item as any).pubDate || new Date().toISOString();
+        const published_at = item._pubStr;
         const { error } = await supabase.from('articles').insert({
           title,
           original_url: item.link,
@@ -339,6 +404,7 @@ export async function fetchAndStoreArticles() {
       }
       report[source.name] = `${successCount}/${quota}`;
     } catch (e) {
+      console.error(`[${source.name}] Critical Error:`, e);
       report[source.name] = `Error`;
     }
   }

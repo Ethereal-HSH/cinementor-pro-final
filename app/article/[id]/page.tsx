@@ -13,6 +13,9 @@ interface Paragraph {
   show?: boolean;
   loading?: boolean;
   isImage?: boolean; // 新增：标识是否为图片
+  captionZh?: string | null;
+  captionShow?: boolean;
+  captionLoading?: boolean;
 }
 
 export default function ArticlePage() {
@@ -142,7 +145,10 @@ export default function ArticlePage() {
             translation: img.alt,
             show: true,
             loading: false,
-            isImage: true
+            isImage: true,
+            captionZh: null,
+            captionShow: false,
+            captionLoading: false
           };
         }
 
@@ -186,6 +192,33 @@ export default function ArticlePage() {
       alert("加载文章失败");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleToggleCaption = async (idx: number) => {
+    const para = paragraphs[idx];
+    if (!para.isImage) return;
+    const baseText = para.translation || "";
+    if (!baseText.trim()) return;
+    if (para.captionZh) {
+      setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, captionShow: !p.captionShow } : p));
+      return;
+    }
+    setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, captionLoading: true } : p));
+    try {
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: [baseText] })
+      });
+      const data = await res.json();
+      const t = Array.isArray(data.translation) ? data.translation[0] : data.translation;
+      setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, captionZh: t || "翻译失败", captionShow: true } : p));
+    } catch (e) {
+      console.error(e);
+      setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, captionZh: "翻译失败", captionShow: true } : p));
+    } finally {
+      setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, captionLoading: false } : p));
     }
   };
 
@@ -282,7 +315,36 @@ export default function ArticlePage() {
                       <div style={{display:'none'}} className="w-full min-h-[200px] bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 text-sm">
                         图片加载失败
                       </div>
-                      {para.translation && <figcaption className="text-center text-sm text-gray-500 mt-2">{para.translation}</figcaption>}
+                      <div className="flex justify-center mt-2">
+                        <div className="inline-flex items-center gap-2">
+                          {para.translation && <figcaption className="text-sm text-gray-500">{para.translation}</figcaption>}
+                          <button
+                          aria-label={para.captionLoading ? "译文生成中..." : (para.captionShow ? "隐藏图片说明译文" : "翻译图片说明")}
+                          title={para.captionLoading ? "译文生成中..." : (para.captionShow ? "隐藏图片说明译文" : "翻译图片说明")}
+                          className={`inline-flex items-center justify-center w-6 h-6 rounded-full transition-opacity transition-transform duration-200 text-gray-500 hover:text-ink ${para.captionLoading ? 'cursor-wait' : ''}`}
+                          onClick={() => handleToggleCaption(idx)}
+                          disabled={para.captionLoading}
+                        >
+                          {para.captionLoading ? (
+                            <svg viewBox="0 0 24 24" className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="1.5">
+                              <circle cx="12" cy="12" r="9" opacity="0.25" />
+                              <path d="M12 3a9 9 0 0 1 9 9" />
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                              <path d="M20 3c-3 0-6 1.5-8 3.5L6 12l-2 6 6-2 5.5-6c2-2 3.5-5 3.5-8z" />
+                              <path d="M14 7l3 3" />
+                              <path d="M6 12l6 6" />
+                            </svg>
+                          )}
+                          </button>
+                        </div>
+                      </div>
+                      {para.captionShow && (
+                        <div className={`mt-2 px-3 py-2 bg-gray-50 rounded border border-gray-100 text-gray-700 text-sm leading-relaxed transition-opacity duration-500 inline-block mx-auto ${para.captionZh ? 'opacity-100' : 'opacity-50'} text-center`}>
+                          {para.captionZh || (para.captionLoading ? "译文生成中..." : "暂无译文")}
+                        </div>
+                      )}
                   </figure>
               ) : (
                 <>
