@@ -1,5 +1,8 @@
+import dns from 'node:dns';
 import Parser from 'rss-parser';
 import { supabase } from './supabase';
+
+dns.setDefaultResultOrder?.('ipv4first');
 
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || "";
 
@@ -85,50 +88,125 @@ function isContentValid(markdown: string, source: string) {
 
 async function fetchFeedWithSnapshot(url: string) {
   const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  let res;
+
+  const fetchWithTimeout = async (input: string, init: RequestInit, timeoutMs: number) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const tryRss2Json = async () => {
+    const apiUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(url)}`;
+    const apiRes = await fetchWithTimeout(apiUrl, { headers: { 'User-Agent': ua, 'Accept': 'application/json' } }, 15000);
+    const data = await apiRes.json().catch(() => ({} as any));
+    if (apiRes.ok && data && data.status === 'ok' && Array.isArray(data.items)) {
+      const items = data.items.map((it: any) => {
+        const description = (it?.description || '').toString();
+        const snippet = description.replace(/<[^>]+>/g, '').slice(0, 200);
+        return {
+          title: (it?.title || '').toString(),
+          link: (it?.link || '').toString(),
+          guid: (it?.guid || it?.link || '').toString(),
+          pubDate: (it?.pubDate || '').toString(),
+          isoDate: (it?.pubDate || '').toString(),
+          content: (it?.content || it?.description || '').toString(),
+          contentEncoded: (it?.content || '').toString(),
+          contentSnippet: snippet
+        };
+      });
+      console.log(`[Feed Snapshot] rss2json success for ${url} items=${items.length}`);
+      return { items } as any;
+    }
+    console.log(`[Feed Snapshot] rss2json failed for ${url} status=${apiRes.status}`);
+    return null;
+  };
+
   try {
-    res = await fetch(url, { headers: { 'User-Agent': ua, 'Accept': 'application/xml,text/xml,application/rss+xml' } });
+    const feed = await tryRss2Json();
+    if (feed) return feed;
+  } catch (e) {
+    console.log(`[Feed Snapshot] rss2json failed: ${e}`);
+  }
+
+  try {
+    const feed = await Promise.race([
+      parser.parseURL(url),
+      new Promise<never>((_r, reject) =>
+        setTimeout(() => reject(new Error('feed parseURL timeout')), 15000)
+      )
+    ]);
+    return feed;
+  } catch (e) {
+    console.log(`[Feed Snapshot] parseURL failed: ${e}`);
+  }
+
+  const isLikelyXml = (t: string) => {
+    const s = (t || '').trim().replace(/^[\s\ufeff]+/, '');
+    if (!s) return false;
+    if (!s.startsWith('<')) return false;
+    return /<(rss|feed)\b/i.test(s);
+  };
+
+  const parseXml = async (xml: string) => {
+    const cleaned = (xml || '').trim().replace(/^[\s\ufeff]+/, '');
+    return parser.parseString(cleaned);
+  };
+
+  let res: Response | undefined;
+  try {
+    res = await fetchWithTimeout(
+      url,
+      { headers: { 'User-Agent': ua, 'Accept': 'application/xml,text/xml,application/rss+xml' } },
+      15000
+    );
   } catch (e) {
     console.log(`[Feed Snapshot] Direct fetch failed: ${e}`);
   }
 
-  if (!res || !res.ok) {
-    console.log(`[Feed Snapshot] Direct fetch status=${res?.status}, trying proxy...`);
-    // Use /get for JSON wrapper which handles CORS/Types better, but for RSS parser we need raw text.
-    // Try /raw first, if fail then /get
-    let proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    res = await fetch(proxyUrl);
-    if (!res.ok) {
-       console.log(`[Feed Snapshot] /raw proxy failed, trying /get...`);
-       proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-       res = await fetch(proxyUrl);
-       if (res.ok) {
-         const data = await res.json().catch(() => ({}));
-         if (data.contents) {
-            console.log(`[Feed Snapshot] Proxy /get success for ${url}`);
-            // Mock a response object compatible with text()
-            let content = data.contents;
-            if (typeof content === 'string') {
-              content = content.trim();
-              // Remove potential BOM or garbage
-              content = content.replace(/^[\s\ufeff]+/, '');
-            }
-            const feed = await parser.parseString(content);
-            return feed;
-         }
-       }
+  if (res?.ok) {
+    const body = await res.text().catch(() => '');
+    const snap = body.slice(0, 200);
+    console.log(`[Feed Snapshot] ${url} status=${res.status} ${snap}`);
+    if (isLikelyXml(body)) {
+      return await parseXml(body);
     }
+  } else {
+    console.log(`[Feed Snapshot] Direct fetch status=${res?.status}, trying proxy...`);
   }
 
-  const body = await res.text().catch(() => '');
-  const snap = body.slice(0, 200);
-  if (!res.ok) {
-    console.log(`[Feed Snapshot] ${url} status=${res.status} ${snap}`);
-    throw new Error(`feed fetch failed ${res.status}`);
+  try {
+    const rawUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    const rawRes = await fetchWithTimeout(rawUrl, {}, 15000);
+    const rawBody = await rawRes.text().catch(() => '');
+    const rawSnap = rawBody.slice(0, 200);
+    console.log(`[Feed Snapshot] ${url} proxy=/raw status=${rawRes.status} ${rawSnap}`);
+    if (rawRes.ok && isLikelyXml(rawBody)) {
+      return await parseXml(rawBody);
+    }
+  } catch (e) {
+    console.log(`[Feed Snapshot] /raw proxy failed: ${e}`);
   }
-  console.log(`[Feed Snapshot] ${url} status=${res.status} ${snap}`);
-  const feed = await parser.parseString(body);
-  return feed;
+
+  try {
+    const getUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const getRes = await fetchWithTimeout(getUrl, {}, 15000);
+    const data = await getRes.json().catch(() => ({} as any));
+    const contents =
+      (data && typeof data === 'object' && 'contents' in data ? (data as any).contents : '') || '';
+    const snap = typeof contents === 'string' ? contents.slice(0, 200) : '';
+    console.log(`[Feed Snapshot] ${url} proxy=/get status=${getRes.status} ${snap}`);
+    if (getRes.ok && typeof contents === 'string' && isLikelyXml(contents)) {
+      return await parseXml(contents);
+    }
+  } catch (e) {
+    console.log(`[Feed Snapshot] /get proxy failed: ${e}`);
+  }
+
+  throw new Error('feed fetch failed');
 }
 
 async function fetchRawMarkdown(url: string, selector?: string): Promise<{ markdown: string; title: string }> {
@@ -474,8 +552,34 @@ export async function fetchAndStoreArticles() {
       const newItems = candidates.filter(c => !existingLinks.has(c.link));
       
       let successCount = 0;
+      const lightweight = true;
       for (const item of newItems) {
         if (successCount >= quota) break;
+
+        if (lightweight) {
+          const title = (item as any).title || 'Untitled';
+          const summaryBase = ((item as any).contentSnippet || (item as any).content || '') as string;
+          const summary = summaryBase ? summaryBase.slice(0, 200) : '';
+          const published_at = item._pubStr;
+          const rssContent = (item as any).contentEncoded || (item as any).content || '';
+          const markdown = typeof rssContent === 'string' && rssContent.trim() ? htmlToMarkdown(rssContent) : '';
+          const { error } = await supabase.from('articles').insert({
+            title,
+            original_url: item.link,
+            source: source.name,
+            published_at: new Date(published_at).toISOString(),
+            summary,
+            content: "",
+            raw_markdown: markdown ? normalizeMarkdownSource(markdown, source.name) : "",
+            status: 'unread'
+          });
+          if (!error) {
+            successCount++;
+            allResults.push({ title, source: source.name });
+          }
+          continue;
+        }
+
         const sel = selectorFor(item.link, source.name);
         let { markdown, title: jinaTitle } = await fetchRawMarkdown(item.link, sel);
         

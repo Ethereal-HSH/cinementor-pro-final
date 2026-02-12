@@ -41,7 +41,14 @@ export default function HomePage() {
   const triggerFetch = async () => {
     setRefreshing(true);
     try {
-      await fetch("/api/cron/fetch");
+      const res = await fetch("/api/cron/fetch");
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        throw new Error(payload?.error || payload?.message || `HTTP ${res.status}`);
+      }
+      if (Array.isArray(payload?.data) && payload.data.length === 0) {
+        alert("没有抓取到新文章（可能已是最新）");
+      }
       await fetchArticles();
     } catch (e) {
       console.error(e);
