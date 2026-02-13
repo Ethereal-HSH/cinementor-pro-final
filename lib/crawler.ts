@@ -1,4 +1,5 @@
 import dns from 'node:dns';
+import https from 'node:https';
 import Parser from 'rss-parser';
 import { supabase } from './supabase';
 
@@ -84,6 +85,58 @@ function isContentValid(markdown: string, source: string) {
   if (source === 'CNBC Technology') return typeof markdown === 'string' && markdown.length >= 200;
   const need = source === 'Aeon Essays' ? 1000 : base; // Lower Aeon to 1000 to be safe
   return typeof markdown === 'string' && markdown.length >= need;
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function tryGuardianContentApi(url: string) {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!u.hostname.includes('theguardian.com')) return null;
+
+  const apiUrl = `https://content.guardianapis.com${u.pathname}?api-key=test&show-fields=bodyText,headline,standfirst,thumbnail`;
+  try {
+    const res = await fetchWithTimeout(apiUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    }, 15000);
+    if (!res.ok) return null;
+    const data: any = await res.json().catch(() => null);
+    const content = data?.response?.content;
+    const fields = content?.fields || {};
+    const title = (fields.headline || content?.webTitle || '').toString();
+    const bodyText = (fields.bodyText || '').toString();
+    if (!bodyText) return null;
+    const paras = bodyText
+      .replace(/\r/g, '')
+      .split(/\n{2,}|\n/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    const standfirst = (fields.standfirst || '').toString().replace(/<[^>]+>/g, '').trim();
+    const thumbnail = (fields.thumbnail || '').toString().trim();
+
+    let md = '';
+    if (thumbnail) md += `![](${thumbnail})\n\n`;
+    if (standfirst) md += `${standfirst}\n\n`;
+    md += paras.join('\n\n');
+    return { title, markdown: md };
+  } catch {
+    return null;
+  }
 }
 
 async function fetchFeedWithSnapshot(url: string) {
@@ -210,7 +263,14 @@ async function fetchFeedWithSnapshot(url: string) {
 }
 
 async function fetchRawMarkdown(url: string, selector?: string): Promise<{ markdown: string; title: string }> {
-  const clean = sanitizeUrl(url);
+  let clean = sanitizeUrl(url);
+  try {
+    const u = new URL(clean);
+    if (u.hostname === 'www.theguardian.com') {
+      u.hostname = 'amp.theguardian.com';
+      clean = u.toString();
+    }
+  } catch {}
   const jinaUrl = `https://r.jina.ai/${clean}`;
   const headersBase: Record<string, string> = {
     "Accept": "application/json",
@@ -244,30 +304,147 @@ async function fetchRawMarkdown(url: string, selector?: string): Promise<{ markd
 
 async function fetchHtml(url: string) {
   const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  let res;
+  const looksLikeHtml = (t: string) => /<!doctype\s+html|<html\b/i.test(t || '');
+  const timeoutMs = (() => {
+    try {
+      const host = new URL(url).hostname;
+      if (host.includes('theguardian.com')) return 25000;
+    } catch {}
+    return 15000;
+  })();
+  const targets: string[] = [url];
   try {
-    res = await fetch(url, { headers: { 'User-Agent': ua, 'Accept': 'text/html' } });
-  } catch (e) {
-    console.log(`[HTML Snapshot] Direct fetch failed: ${e}`);
-  }
-
-  if (!res || !res.ok) {
-     console.log(`[HTML Snapshot] Direct fetch status=${res?.status}, trying proxy...`);
-     const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-     res = await fetch(proxyUrl);
-     if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (data.contents) {
-            console.log(`[HTML Snapshot] Proxy success for ${url}`);
-            return data.contents;
+    const u = new URL(url);
+    if (u.hostname === 'www.theguardian.com') {
+      const amp = new URL(url);
+      amp.hostname = 'amp.theguardian.com';
+      targets.unshift(amp.toString());
+    }
+  } catch {}
+  const nativeGet = (targetUrl: string, timeoutMs: number, redirectsLeft: number): Promise<{ status: number; text: string }> => {
+    return new Promise((resolve, reject) => {
+      let u: URL;
+      try {
+        u = new URL(targetUrl);
+      } catch {
+        reject(new Error('invalid url'));
+        return;
+      }
+      const req = https.request(
+        {
+          protocol: u.protocol,
+          hostname: u.hostname,
+          port: u.port ? parseInt(u.port, 10) : undefined,
+          path: u.pathname + u.search,
+          method: 'GET',
+          headers: {
+            'User-Agent': ua,
+            'Accept': 'text/html',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'identity',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Referer': u.origin + '/'
+          },
+          timeout: timeoutMs
+        },
+        (res) => {
+          const status = res.statusCode || 0;
+          const loc = res.headers.location;
+          if (loc && [301, 302, 303, 307, 308].includes(status) && redirectsLeft > 0) {
+            res.resume();
+            const nextUrl = new URL(loc, targetUrl).toString();
+            nativeGet(nextUrl, timeoutMs, redirectsLeft - 1).then(resolve).catch(reject);
+            return;
+          }
+          let data = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
+          res.on('end', () => resolve({ status, text: data }));
         }
-     }
+      );
+      req.on('timeout', () => {
+        req.destroy(new Error('timeout'));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  };
+
+  const fetchWithTimeout = async (input: string, init: RequestInit, timeoutMs: number) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  for (const target of targets) {
+    try {
+      const r = await nativeGet(target, timeoutMs, 4);
+      if (r.status >= 200 && r.status < 300 && r.text && looksLikeHtml(r.text)) {
+        console.log(`[HTML Snapshot] ${target} status=${r.status} ${r.text.slice(0, 200)}`);
+        return r.text;
+      }
+    } catch (e) {
+      console.log(`[HTML Snapshot] Direct fetch failed: ${e}`);
+    }
+
+    let res: Response | undefined;
+    try {
+      res = await fetchWithTimeout(target, { headers: { 'User-Agent': ua, 'Accept': 'text/html' } }, timeoutMs);
+    } catch (e) {
+      console.log(`[HTML Snapshot] Direct fetch failed: ${e}`);
+    }
+
+    if (!res || !res.ok) {
+      console.log(`[HTML Snapshot] Direct fetch status=${res?.status}, trying proxy...`);
+      const rawProxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`;
+      try {
+        res = await fetchWithTimeout(rawProxyUrl, {}, timeoutMs);
+      } catch (e) {
+        console.log(`[HTML Snapshot] Proxy fetch failed: ${e}`);
+      }
+
+      if (res && res.ok) {
+        const text = await res.text().catch(() => '');
+        console.log(`[HTML Snapshot] ${target} proxy=/raw status=${res.status} ${text.slice(0, 200)}`);
+        if (text && looksLikeHtml(text)) return text;
+      }
+
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(target)}`;
+      try {
+        res = await fetchWithTimeout(proxyUrl, {}, timeoutMs);
+      } catch (e) {
+        console.log(`[HTML Snapshot] Proxy fetch failed: ${e}`);
+      }
+    }
+
+    if (!res) continue;
+
+    const raw = await res.text().catch(() => '');
+    let text = raw;
+    if (res.ok) {
+      const trimmed = (raw || '').trim();
+      if (trimmed.startsWith('{') && trimmed.includes('"contents"')) {
+        try {
+          const data = JSON.parse(trimmed);
+          if (data && typeof data === 'object' && typeof (data as any).contents === 'string') {
+            text = (data as any).contents;
+          }
+        } catch {}
+      }
+    }
+
+    console.log(`[HTML Snapshot] ${target} status=${res.status} ${text.slice(0, 200)}`);
+    if (res.ok && text && looksLikeHtml(text)) return text;
   }
 
-  const text = await res.text().catch(() => '');
-  console.log(`[HTML Snapshot] ${url} status=${res.status} ${text.slice(0, 200)}`);
-  if (!res.ok) return '';
-  return text;
+  return '';
 }
 
 function htmlToMarkdown(html: string) {
@@ -414,6 +591,44 @@ async function domainFallbackMarkdown(url: string) {
       articleHtml = mm ? mm[0] : '';
     }
   } else if (host.includes('theguardian.com')) {
+    const ldScripts = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+    const extractArticleBody = (v: any): string => {
+      if (!v) return '';
+      if (Array.isArray(v)) {
+        for (const it of v) {
+          const r = extractArticleBody(it);
+          if (r) return r;
+        }
+        return '';
+      }
+      if (typeof v === 'object') {
+        if (typeof (v as any).articleBody === 'string' && (v as any).articleBody.trim()) return (v as any).articleBody;
+        if ((v as any)['@graph']) return extractArticleBody((v as any)['@graph']);
+        for (const key of Object.keys(v)) {
+          const r = extractArticleBody((v as any)[key]);
+          if (r) return r;
+        }
+      }
+      return '';
+    };
+    for (const s of ldScripts) {
+      const m = s.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+      const jsonText = (m?.[1] || '').trim();
+      if (!jsonText) continue;
+      try {
+        const data = JSON.parse(jsonText);
+        const body = extractArticleBody(data);
+        if (body) {
+          return body
+            .replace(/\r/g, '')
+            .split(/\n{2,}|\n+/)
+            .map(p => p.trim())
+            .filter(Boolean)
+            .join('\n\n');
+        }
+      } catch {}
+    }
+
     const m = html.match(/<div[^>]*class=["'][^"']*content__article-body[^"']*["'][^>]*>[\s\S]*?<\/div>/i);
     articleHtml = m ? m[0] : '';
     if (!articleHtml) {
@@ -485,6 +700,12 @@ export function cleanContent(text: string, url?: string) {
 }
 
 export async function fetchArticleMarkdown(url: string, source: string) {
+  if (source === 'The Guardian') {
+    const api = await tryGuardianContentApi(url);
+    if (api && isContentValid(api.markdown, source)) {
+      return { markdown: normalizeMarkdownSource(api.markdown, source), title: api.title || '' };
+    }
+  }
   const sel = selectorFor(url, source);
   let { markdown, title } = await fetchRawMarkdown(url, sel);
   if (!isContentValid(markdown, source)) {
@@ -552,7 +773,8 @@ export async function fetchAndStoreArticles() {
       const newItems = candidates.filter(c => !existingLinks.has(c.link));
       
       let successCount = 0;
-      const lightweight = true;
+      const fullFetch = source.name === 'The Guardian';
+      const lightweight = !fullFetch;
       for (const item of newItems) {
         if (successCount >= quota) break;
 
