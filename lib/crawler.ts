@@ -668,7 +668,75 @@ async function domainFallbackMarkdown(url: string) {
 
 function normalizeMarkdownSource(md: string, source: string) {
   let s = (md || '').replace(/\r/g, '');
+  const fixUtf8Mojibake = (input: string) => {
+    const raw = input || '';
+    if (!/[ÃÂâ]/.test(raw)) return raw;
+    try {
+      const bytes = Uint8Array.from(Array.from(raw, ch => ch.charCodeAt(0) & 0xff));
+      const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      if (!decoded) return raw;
+      if (decoded.includes('\uFFFD')) return raw;
+      const badBefore = (raw.match(/[ÃÂâ]/g) || []).length;
+      const badAfter = (decoded.match(/[ÃÂâ]/g) || []).length;
+      if (badAfter <= badBefore) return decoded;
+      return raw;
+    } catch {
+      return raw;
+    }
+  };
+  const fixSmartPunctuationArtifacts = (input: string) => {
+    let s = input || '';
+    s = s.replace(/[\u200b\u00a0\u00ad\ufeff]/g, '');
+    s = s
+      .replace(/\u00c2\s/g, ' ')
+      .replace(/\u00c2/g, '')
+      .replace(/\u00e2\u20ac\u2122/g, '’')
+      .replace(/\u00e2\u0080\u0099/g, '’')
+      .replace(/\u00e2\u20ac\u02dc/g, '‘')
+      .replace(/\u00e2\u0080\u0098/g, '‘')
+      .replace(/\u00e2\u20ac\u0153/g, '“')
+      .replace(/\u00e2\u0080\u009c/g, '“')
+      .replace(/\u00e2\u20ac\u009d/g, '”')
+      .replace(/\u00e2\u0080\u009d/g, '”')
+      .replace(/\u00e2\u20ac\u2013/g, '–')
+      .replace(/\u00e2\u0080\u0093/g, '–')
+      .replace(/\u00e2\u20ac\u2014/g, '—')
+      .replace(/\u00e2\u0080\u0094/g, '—')
+      .replace(/\u00e2\u20ac\u2026/g, '…')
+      .replace(/\u00e2\u0080\u00a6/g, '…')
+      .replace(/\u00e2\u20ac\u2022/g, '•')
+      .replace(/\u00e2\u0080\u00a2/g, '•')
+      .replace(/\u00e2\u201e\u00a2/g, '™')
+      .replace(/\u00e2\u0084\u00a2/g, '™');
+
+    s = s.replace(/[\u0080-\u009f]/g, '');
+
+    s = s
+      .replace(/([A-Za-z])\u00e2[\u200b\u00a0\u00ad\ufeff]*s\b/g, "$1’s")
+      .replace(/([A-Za-z])\u00e2[\u0080-\u009f\u200b\u00a0\u00ad\ufeff]*s\b/g, "$1’s")
+      .replace(/([A-Za-z]s)\u00e2[\u200b\u00a0\u00ad\ufeff]*\s/g, "$1’ ")
+      .replace(/([A-Za-z]s)\u00e2[\u0080-\u009f\u200b\u00a0\u00ad\ufeff]*\s/g, "$1’ ")
+      .replace(/n\u00e2t\b/gi, "n’t")
+      .replace(/n\u00e2[\u0080-\u009f]*t\b/gi, "n’t")
+      .replace(/I\u00e2m\b/g, "I’m")
+      .replace(/I\u00e2[\u0080-\u009f]*m\b/g, "I’m")
+      .replace(/we\u00e2re\b/gi, "we’re")
+      .replace(/you\u00e2re\b/gi, "you’re")
+      .replace(/they\u00e2re\b/gi, "they’re")
+      .replace(/it\u00e2s\b/gi, "it’s")
+      .replace(/that\u00e2s\b/gi, "that’s")
+      .replace(/there\u00e2s\b/gi, "there’s");
+    return s;
+  };
+
+  s = fixSmartPunctuationArtifacts(fixUtf8Mojibake(s));
   if (source === 'The Guardian') {
+    s = s
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u201c\u201d]/g, '"')
+      .replace(/[\u2013\u2014]/g, '-')
+      .replace(/\u2026/g, '...');
+
     s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt, url) => {
       const u = decodeUrlEntities(String(url || '').trim());
       return `![${alt || ''}](${u})`;
@@ -685,12 +753,28 @@ function normalizeMarkdownSource(md: string, source: string) {
       return /Explore more on these topics|Reuse this content|mailto:/i.test(p)
         || /\]\(\/(world|tone|commentisfree|sport|uk-news|us-news)[^)]+\)/i.test(p)
         || /More on (these|this) topics?/i.test(p)
-        || /^Tags?:/i.test(p);
+        || /^Tags?:/i.test(p)
+        || /^Related:/i.test(p)
+        || /^This article was amended/i.test(p)
+        || /^First published on/i.test(p)
+        || /^Sign up to /i.test(p)
+        || /^Support the Guardian/i.test(p)
+        || /^Share on /i.test(p);
     };
     while (paras.length > 0 && isFooter(paras[paras.length - 1])) {
       paras.pop();
     }
-    s = paras.join('\n\n');
+
+    const dedup = new Set<string>();
+    const unique: string[] = [];
+    for (const p of paras) {
+      const key = p.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!key) continue;
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      unique.push(p);
+    }
+    s = fixSmartPunctuationArtifacts(fixUtf8Mojibake(unique.join('\n\n')));
   }
   return s.trim();
 }

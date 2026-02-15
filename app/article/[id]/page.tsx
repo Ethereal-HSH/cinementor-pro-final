@@ -88,6 +88,75 @@ export default function ArticlePage() {
     return unique;
   };
 
+  const splitIntoParagraphBlocks = (text: string) => {
+    const s = (text || "").replace(/\r/g, "").trim();
+    if (!s) return [];
+
+    const byBlank = s
+      .split(/\n\s*\n+/)
+      .map(p => p.trim())
+      .filter(Boolean);
+    if (byBlank.length > 1) return byBlank;
+    if (!s.includes("\n")) return [s];
+
+    const lines = s
+      .split(/\n+/)
+      .map(l => l.trim())
+      .filter(Boolean);
+
+    const paras: string[] = [];
+    let buf = "";
+    const flush = () => {
+      const t = buf.trim();
+      if (t) paras.push(t);
+      buf = "";
+    };
+    const isSentenceEnd = (t: string) => /[.!?]["')\]]?$/.test((t || "").trim());
+    const startsLikeNew = (t: string) => /^[A-Z0-9“"'\[]/.test((t || "").trim());
+
+    for (const line of lines) {
+      if (!line) continue;
+      if (parseImageMarkdown(line)) {
+        flush();
+        paras.push(line);
+        continue;
+      }
+      if (!buf) {
+        buf = line;
+        continue;
+      }
+      const shouldBreak =
+        buf.length > 800 ||
+        (/^[-*]\s+/.test(line) && buf.length > 0) ||
+        (buf.length > 80 && isSentenceEnd(buf) && startsLikeNew(line));
+
+      if (shouldBreak) {
+        flush();
+        buf = line;
+        continue;
+      }
+
+      buf += (buf.endsWith("-") ? "" : " ") + line;
+    }
+    flush();
+    return paras.length > 0 ? paras : [s];
+  };
+
+  const isLikelyImageCaption = (text: string) => {
+    const t = (text || "").trim();
+    if (!t) return false;
+    if (t.length > 500) return false;
+    if (/^#{1,6}\s+/.test(t)) return false;
+    if (/^https?:\/\//i.test(t)) return false;
+    const hasCreditHint = /(photograph|photo|image|credit|©|picture|source:|getty|reuters|alamy|shutterstock|associated press|\bap\b|press association|\bpa\b)/i.test(t);
+    const looksLikeSentenceEnd = /[.!?]["')\]]?$/.test(t);
+    const sentences = splitIntoSentences(decodeHTMLEntities(t));
+    if (sentences.length >= 4) return false;
+    if (t.length <= 140) return hasCreditHint || !looksLikeSentenceEnd;
+    if (t.length <= 260) return hasCreditHint;
+    return hasCreditHint;
+  };
+
   useEffect(() => {
     if (id) {
       fetchArticle(id as string);
@@ -134,35 +203,48 @@ export default function ArticlePage() {
         }
       }
       
-      const rawParas = cleanupParas(content.split(/\n\n+/).filter((p: string) => p.trim().length > 0));
-      
-      const processedParas = rawParas.map((p: string, idx: number) => {
+      const rawParas = cleanupParas(splitIntoParagraphBlocks(content));
+
+      const processedParas: Paragraph[] = [];
+      for (let i = 0; i < rawParas.length; i++) {
+        const p = rawParas[i];
         const img = parseImageMarkdown(p);
         if (img) {
-          return {
-            id: `para-${idx}`,
+          const next = rawParas[i + 1] || "";
+          const altText = decodeHTMLEntities(img.alt || "").trim();
+          let caption = altText;
+          if (next && isLikelyImageCaption(next)) {
+            const nextText = decodeHTMLEntities(next).trim();
+            if (!caption) caption = nextText;
+            else if (nextText && nextText.toLowerCase() !== caption.toLowerCase()) caption = `${caption}\n${nextText}`;
+            i++;
+          }
+
+          processedParas.push({
+            id: `para-${processedParas.length}`,
             original: p,
             sentences: [img.src],
-            translation: decodeHTMLEntities(img.alt),
+            translation: caption || null,
             show: true,
             loading: false,
             isImage: true,
             captionZh: null,
             captionShow: false,
             captionLoading: false
-          };
+          });
+          continue;
         }
 
-        return {
-            id: `para-${idx}`,
-            original: p,
-            sentences: splitIntoSentences(decodeHTMLEntities(p)),
-            translation: null,
-            show: false,
-            loading: false,
-            isImage: false
-        };
-      });
+        processedParas.push({
+          id: `para-${processedParas.length}`,
+          original: p,
+          sentences: splitIntoSentences(decodeHTMLEntities(p)),
+          translation: null,
+          show: false,
+          loading: false,
+          isImage: false
+        });
+      }
 
       setParagraphs(processedParas);
 
@@ -318,7 +400,7 @@ export default function ArticlePage() {
                       </div>
                       <div className="flex justify-center mt-2">
                         <div className="inline-flex items-center gap-2">
-                          {para.translation && <figcaption className="text-sm text-gray-500">{para.translation}</figcaption>}
+                          {para.translation && <figcaption className="text-sm text-gray-500 whitespace-pre-wrap">{para.translation}</figcaption>}
                           <button
                           aria-label={para.captionLoading ? "译文生成中..." : (para.captionShow ? "隐藏图片说明译文" : "翻译图片说明")}
                           title={para.captionLoading ? "译文生成中..." : (para.captionShow ? "隐藏图片说明译文" : "翻译图片说明")}
