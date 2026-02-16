@@ -196,7 +196,107 @@ function normalizeGuardianStoredMarkdown(md: string) {
     dedup.add(key);
     unique.push(p);
   }
-  return fixSmartPunctuationArtifacts(fixUtf8Mojibake(unique.join('\n\n').trim()));
+  let out = fixSmartPunctuationArtifacts(fixUtf8Mojibake(unique.join('\n\n').trim()));
+
+  const countParagraphBreaks = (s: string) => (s.match(/\n\n/g) || []).length;
+  const needsParagraphize = (s: string) => {
+    const len = (s || '').trim().length;
+    if (len < 700) return false;
+    const nlp = countParagraphBreaks(s);
+    if (nlp === 0) return true;
+    const paras = nlp + 1;
+    const avg = len / paras;
+    if (avg > 900) return true;
+    if (len > 2000 && nlp < 4) return true;
+    if (len > 4000 && nlp < 8) return true;
+    return false;
+  };
+
+  if (needsParagraphize(out)) {
+    const splitIntoSentences = (text: string) => {
+      const t = text || '';
+      return t.match(/[^.!?]+[.!?]+["')\]]?|[^.!?]+$/g)?.map(s => s.trim()).filter(Boolean) || [t];
+    };
+    const parseImage = (line: string) => /^!\[[^\]]*\]\([^)]+\)/.test((line || '').trim());
+    const isHeadingOrRule = (line: string) => {
+      const t = (line || '').trim();
+      return /^#{1,6}\s+/.test(t) || /^[-*]{3,}$/.test(t) || /^>\s+/.test(t);
+    };
+    const isBullet = (line: string) => /^[-*]\s+/.test((line || '').trim());
+    const isSentenceEnd = (t: string) => /[.!?]["')\]]?$/.test((t || '').trim());
+    const startsLikeNew = (t: string) => /^[A-Z0-9“"'\[]/.test((t || '').trim());
+
+    const s = out;
+    const byBlank = s.split(/\n\s*\n+/).map(p => p.trim()).filter(Boolean);
+    const buildFromLines = () => {
+      const lines = s.split(/\n+/).map(l => l.trim()).filter(Boolean);
+      const paras: string[] = [];
+      let buf = '';
+      const flush = () => {
+        const t = buf.trim();
+        if (t) paras.push(t);
+        buf = '';
+      };
+      for (const line of lines) {
+        if (parseImage(line) || isHeadingOrRule(line) || isBullet(line)) {
+          flush();
+          paras.push(line);
+          continue;
+        }
+        if (!buf) {
+          buf = line;
+          continue;
+        }
+        const shouldBreak = buf.length > 700 || (buf.length > 60 && isSentenceEnd(buf) && startsLikeNew(line));
+        if (shouldBreak) {
+          flush();
+          buf = line;
+          continue;
+        }
+        buf += (buf.endsWith('-') ? '' : ' ') + line;
+      }
+      flush();
+      return paras;
+    };
+
+    let paras2: string[] = [];
+    if (byBlank.length > 1) paras2 = byBlank;
+    else if (s.includes('\n')) paras2 = buildFromLines();
+    else {
+      const sentences = splitIntoSentences(s);
+      let buf = '';
+      let sentCount = 0;
+      const flush = () => {
+        const t = buf.trim();
+        if (t) paras2.push(t);
+        buf = '';
+        sentCount = 0;
+      };
+      for (const sent of sentences) {
+        const piece = (sent || '').trim();
+        if (!piece) continue;
+        if (!buf) {
+          buf = piece;
+          sentCount = 1;
+          continue;
+        }
+        const next = `${buf} ${piece}`;
+        if (next.length > 700 || sentCount >= 3) {
+          flush();
+          buf = piece;
+          sentCount = 1;
+          continue;
+        }
+        buf = next;
+        sentCount += 1;
+      }
+      flush();
+    }
+
+    if (paras2.length > 1) out = paras2.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  return out;
 }
 
 async function fetchGuardianOgImage(pageUrl: string) {

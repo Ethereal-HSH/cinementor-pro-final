@@ -81,10 +81,25 @@ function isContentValid(markdown: string, source: string) {
   // Aeon usually has long essays, so keep 2000.
   // But if we extracted via Next.js hack, it might be fragmented, so maybe lower slightly or keep strict?
   // Let's keep 2000 for Aeon to avoid partial crap.
-  // For CNBC, articles can be short, so 500 might be enough if it's a short news piece.
-  if (source === 'CNBC Technology') return typeof markdown === 'string' && markdown.length >= 200;
-  const need = source === 'Aeon Essays' ? 1000 : base; // Lower Aeon to 1000 to be safe
-  return typeof markdown === 'string' && markdown.length >= need;
+  if (source === 'CNBC Technology') {
+    const s = (markdown || '').toString();
+    if (s.length < 400) return false;
+    if (/403\s+Forbidden|Access\s+Denied|verify\s+you\s+are\s+human|enable\s+javascript/i.test(s)) return false;
+    const nlp = (s.match(/\n\n/g) || []).length;
+    if (s.length >= 1200) return true;
+    return nlp >= 2;
+  }
+  if (source === 'Aeon Essays') {
+    const s = (markdown || '').toString();
+    const looksLikeListing = ((s.match(/\b\d+\s+minutes!\[/gi) || []).length >= 5)
+      && ((s.match(/^##\s+/gmi) || []).length >= 5)
+      && ((s.match(/!\[[^\]]*\]\([^\)]+\)/g) || []).length >= 5);
+    if (looksLikeListing) return false;
+    const looksLikeVideo = /youtube\.com\/embed\//i.test(s) || /^Embed:\s+https?:\/\//gmi.test(s);
+    if (looksLikeVideo) return s.length >= 120;
+    return s.length >= 1000;
+  }
+  return typeof markdown === 'string' && markdown.length >= base;
 }
 
 async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number) {
@@ -451,7 +466,7 @@ function htmlToMarkdown(html: string) {
   let s = html;
   s = s.replace(/<script[\s\S]*?<\/script>/gi, '');
   s = s.replace(/<style[\s\S]*?<\/style>/gi, '');
-  s = s.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+  s = s.replace(/<noscript[^>]*>([\s\S]*?)<\/noscript>/gi, (_m, inner) => String(inner || ''));
   s = s.replace(/<aside[\s\S]*?<\/aside>/gi, '');
   s = s.replace(/<nav[\s\S]*?<\/nav>/gi, '');
   s = s.replace(/data-component=["']share["'][^>]*>[\s\S]*?<\/[^>]+>/gi, '');
@@ -477,35 +492,34 @@ function htmlToMarkdown(html: string) {
     return url ? 'https://' + url.replace(/^\/+/, '') : '';
   };
 
+  const pickAttr = (tag: string, names: string[]) => {
+    const t = tag || '';
+    for (const name of names) {
+      const m = t.match(new RegExp(`${name}=["']([^"']+)["']`, 'i'));
+      if (m?.[1]) return m[1];
+    }
+    return '';
+  };
+
   // Handle <figure> first, because it might contain <picture> or <img>
   s = s.replace(/<figure[\s\S]*?<\/figure>/gi, (m) => {
-    const imgMatch = m.match(/<img[^>]*src=["']([^"']+)["'][^>]*alt=["']?([^"'>]*)["']?[^>]*>/i)
-      || m.match(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*src=["']([^"']+)["'][^>]*>/i);
+    const imgTag = (m.match(/<img[^>]*>/i) || [''])[0];
     const srcsetMatch = m.match(/<source[^>]*srcset=["']([^"']+)["'][^>]*>/i);
     const dmvsMatch = m.match(/data-media-viewer-src=["']([^"']+)["']/i);
     let src = '';
     let alt = '';
-    if (imgMatch) {
-      // imgMatch may be (src,alt) or (alt,src)
-      if (imgMatch.length >= 3) {
-        const a = imgMatch[1];
-        const b = imgMatch[2];
-        if (/^https?:|^\/\//.test(a)) {
-          src = a;
-          alt = b || '';
-        } else {
-          alt = a || '';
-          src = b || '';
-        }
+    if (imgTag) {
+      alt = pickAttr(imgTag, ['alt']);
+      src = pickAttr(imgTag, ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-image', 'data-url']);
+      if (!src) {
+        const ss = pickAttr(imgTag, ['srcset', 'data-srcset']);
+        if (ss) src = pickFromSrcset(ss);
       }
-    } else if (srcsetMatch) {
+    }
+    if (!src && srcsetMatch) {
       src = pickFromSrcset(srcsetMatch[1]);
-      const altM = m.match(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*>/i);
-      alt = altM ? altM[1] : '';
     }
-    if (dmvsMatch && !src) {
-      src = dmvsMatch[1];
-    }
+    if (dmvsMatch && !src) src = dmvsMatch[1];
     src = decodeUrlEntities(src);
     if (src && src.startsWith('//')) {
       src = 'https:' + src;
@@ -521,9 +535,14 @@ function htmlToMarkdown(html: string) {
 
   s = s.replace(/<picture[\s\S]*?<\/picture>/gi, (m) => {
     const srcsetMatch = m.match(/<source[^>]*srcset=["']([^"']+)["'][^>]*>/i);
-    const altMatch = m.match(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*>/i);
-    const src = srcsetMatch ? pickFromSrcset(srcsetMatch[1]) : '';
-    const alt = altMatch ? altMatch[1] : '';
+    const imgTag = (m.match(/<img[^>]*>/i) || [''])[0];
+    let src = srcsetMatch ? pickFromSrcset(srcsetMatch[1]) : '';
+    if (!src && imgTag) {
+      const ss = pickAttr(imgTag, ['srcset', 'data-srcset']);
+      if (ss) src = pickFromSrcset(ss);
+      if (!src) src = pickAttr(imgTag, ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-image', 'data-url']);
+    }
+    const alt = imgTag ? pickAttr(imgTag, ['alt']) : '';
     if (!src) return '';
     return `![${alt}](${src})\n\n`;
   });
@@ -531,6 +550,21 @@ function htmlToMarkdown(html: string) {
   s = s.replace(/<img[^>]*alt=["']?([^"'>]*)["']?[^>]*src=["']([^"'>]+)["'][^>]*>/gi, (_m, alt, src) => {
     let url = decodeUrlEntities(src || '');
     const dmvs = (_m.match(/data-media-viewer-src=["']([^"']+)["']/i) || [])[1];
+    if (dmvs) url = decodeUrlEntities(dmvs);
+    if (url.startsWith('//')) url = 'https:' + url;
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
+    return `![${alt || ''}](${url})\n\n`;
+  });
+  s = s.replace(/<img[^>]*>/gi, (m) => {
+    const alt = pickAttr(m, ['alt']);
+    let src = pickAttr(m, ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-image', 'data-url']);
+    if (!src) {
+      const ss = pickAttr(m, ['srcset', 'data-srcset']);
+      if (ss) src = pickFromSrcset(ss);
+    }
+    if (!src) return '';
+    let url = decodeUrlEntities(src || '');
+    const dmvs = (m.match(/data-media-viewer-src=["']([^"']+)["']/i) || [])[1];
     if (dmvs) url = decodeUrlEntities(dmvs);
     if (url.startsWith('//')) url = 'https:' + url;
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
@@ -551,7 +585,10 @@ function htmlToMarkdown(html: string) {
 function extractAeonContent(html: string) {
   // Try standard article extraction first
   const m = html.match(/<article[\s\S]*?>[\s\S]*?<\/article>/i);
-  if (m) return htmlToMarkdown(m[0]);
+  if (m) {
+    const articleHtml = String(m[0] || '').replace(/<noscript[^>]*>([\s\S]*?)<\/noscript>/gi, (_m, inner) => String(inner || ''));
+    return htmlToMarkdown(articleHtml);
+  }
 
   // Fallback to extracting from Next.js hydration data
   const scripts = html.match(/<script[^>]*>self\.__next_f\.push\(\[1,[\s\S]*?\]\)<\/script>/g);
@@ -576,6 +613,127 @@ function extractAeonContent(html: string) {
   
   if (textParts.length === 0) return '';
   return textParts.join('\n\n');
+}
+
+function extractVideoObjectFromLdJson(html: string) {
+  const scripts = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+  const extractJson = (scriptTag: string) => {
+    const m = scriptTag.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+    return (m?.[1] || '').trim();
+  };
+  const findVideoObject = (v: any): any => {
+    if (!v) return null;
+    if (Array.isArray(v)) {
+      for (const it of v) {
+        const r = findVideoObject(it);
+        if (r) return r;
+      }
+      return null;
+    }
+    if (typeof v === 'object') {
+      if ((v as any)['@type'] === 'VideoObject') return v;
+      if ((v as any)['@graph']) return findVideoObject((v as any)['@graph']);
+    }
+    return null;
+  };
+  for (const tag of scripts) {
+    const jsonText = extractJson(tag);
+    if (!jsonText) continue;
+    try {
+      const data = JSON.parse(jsonText);
+      const vo = findVideoObject(data);
+      if (vo) return vo;
+    } catch {}
+  }
+  return null;
+}
+
+function aeonVideoMarkdownFromVideoObject(vo: any) {
+  const title = String(vo?.name || '').trim();
+  const desc = String(vo?.description || '').trim();
+  const duration = String(vo?.duration || '').trim();
+  const embedUrl = String(vo?.embedUrl || '').trim();
+  const safeEmbedUrl = embedUrl.replace('://www.youtube.com/embed/', '://www.youtube-nocookie.com/embed/');
+  const videoId = (() => {
+    const m = safeEmbedUrl.match(/\/embed\/([^?&#/]+)/i);
+    return m?.[1] || '';
+  })();
+  const watchUrl = videoId ? `https://youtu.be/${videoId}` : '';
+  const thumb = Array.isArray(vo?.thumbnailUrl) ? String(vo.thumbnailUrl[0] || '') : String(vo?.thumbnailUrl || '');
+
+  const parts: string[] = [];
+  if (title) parts.push(`## ${title}`);
+  if (desc) parts.push(desc);
+  if (thumb) parts.push(`![](${thumb})`);
+  if (duration) parts.push(`Duration: ${duration}`);
+  if (safeEmbedUrl) parts.push(`Embed: ${safeEmbedUrl}`);
+  if (watchUrl) parts.push(`Watch: ${watchUrl}`);
+  return parts.filter(Boolean).join('\n\n').trim();
+}
+
+async function tryYoutubeTranscript(videoId: string) {
+  const id = String(videoId || '').trim();
+  if (!id) return '';
+  const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  const urls = [
+    `https://www.youtube.com/api/timedtext?fmt=vtt&lang=en&v=${encodeURIComponent(id)}`,
+    `https://www.youtube.com/api/timedtext?fmt=vtt&lang=en&kind=asr&v=${encodeURIComponent(id)}`,
+  ];
+
+  for (const u of urls) {
+    try {
+      const res = await fetchWithTimeout(u, { headers: { 'User-Agent': ua, 'Accept': 'text/vtt,text/plain;q=0.9,*/*;q=0.1' } }, 12000);
+      if (!res.ok) continue;
+      const text = await res.text().catch(() => '');
+      const t = String(text || '').trim();
+      if (!t) continue;
+      if (/sign\s+in|confirm\s+your\s+age|consent\.youtube\.com/i.test(t)) continue;
+      if (/^<transcript\/>\s*$/i.test(t)) continue;
+      if (!/WEBVTT/i.test(t) && t.length < 80) continue;
+      return t;
+    } catch {
+      continue;
+    }
+  }
+  return '';
+}
+
+function vttToPlainText(vtt: string) {
+  const lines = String(vtt || '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map(l => l.trim());
+  const out: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (/^WEBVTT/i.test(line)) continue;
+    if (/^\d+$/.test(line)) continue;
+    if (/^\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}/.test(line)) continue;
+    if (/^NOTE\b/i.test(line)) continue;
+    const cleaned = line.replace(/<[^>]+>/g, '').trim();
+    if (cleaned) out.push(cleaned);
+  }
+  const merged = out.join(' ').replace(/\s+/g, ' ').trim();
+  if (!merged) return '';
+  const chunks: string[] = [];
+  let buf = '';
+  for (const part of merged.split(/(?<=[.!?])\s+/)) {
+    const p = part.trim();
+    if (!p) continue;
+    const next = buf ? `${buf} ${p}` : p;
+    if (next.length >= 520) {
+      if (buf.trim()) chunks.push(buf.trim());
+      buf = p;
+      continue;
+    }
+    buf = next;
+    if (buf.length >= 260 && /[.!?]$/.test(buf)) {
+      chunks.push(buf.trim());
+      buf = '';
+    }
+  }
+  if (buf.trim()) chunks.push(buf.trim());
+  return chunks.join('\n\n').trim();
 }
 
 async function domainFallbackMarkdown(url: string) {
@@ -641,12 +799,99 @@ async function domainFallbackMarkdown(url: string) {
     const m = html.match(/<article[\s\S]*?>[\s\S]*?<\/article>/i);
     articleHtml = m ? m[0] : '';
   } else if (host.includes('cnbc.com')) {
-     const m = html.match(/<div[^>]*class=["'][^"']*ArticleBody-articleBody[^"']*["'][^>]*>[\s\S]*?<\/div>/i);
-     articleHtml = m ? m[0] : '';
-     if (!articleHtml) {
-        const mm = html.match(/<div[^>]*class=["'][^"']*Group-container[^"']*["'][^>]*>[\s\S]*?<\/div>/i);
-        articleHtml = mm ? mm[0] : '';
-     }
+    const extractNextDataCandidate = () => {
+      const m = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+      const jsonText = (m?.[1] || '').trim();
+      if (!jsonText) return '';
+      try {
+        const data = JSON.parse(jsonText);
+
+        const candidates: string[] = [];
+        const walk = (v: any, path: string) => {
+          if (!v) return;
+          if (typeof v === 'string') {
+            const s = v;
+            if (s.length > 800 && /<p\b/i.test(s)) {
+              candidates.push(s);
+              return;
+            }
+            if (s.length > 1500 && (/(\n\n)|\n/.test(s) || /<br\b/i.test(s))) {
+              candidates.push(s);
+              return;
+            }
+            return;
+          }
+          if (Array.isArray(v)) {
+            for (let i = 0; i < v.length; i++) walk(v[i], `${path}[${i}]`);
+            return;
+          }
+          if (typeof v === 'object') {
+            for (const k of Object.keys(v)) {
+              const nextPath = path ? `${path}.${k}` : k;
+              walk((v as any)[k], nextPath);
+            }
+          }
+        };
+
+        walk(data, '');
+        if (candidates.length === 0) return '';
+        candidates.sort((a, b) => b.length - a.length);
+        return candidates[0];
+      } catch {
+        return '';
+      }
+    };
+
+    const ldScripts = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+    const extractArticleBody = (v: any): string => {
+      if (!v) return '';
+      if (Array.isArray(v)) {
+        for (const it of v) {
+          const r = extractArticleBody(it);
+          if (r) return r;
+        }
+        return '';
+      }
+      if (typeof v === 'object') {
+        if (typeof (v as any).articleBody === 'string' && (v as any).articleBody.trim()) return (v as any).articleBody;
+        if ((v as any)['@graph']) return extractArticleBody((v as any)['@graph']);
+        for (const key of Object.keys(v)) {
+          const r = extractArticleBody((v as any)[key]);
+          if (r) return r;
+        }
+      }
+      return '';
+    };
+    for (const s of ldScripts) {
+      const m = s.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+      const jsonText = (m?.[1] || '').trim();
+      if (!jsonText) continue;
+      try {
+        const data = JSON.parse(jsonText);
+        const body = extractArticleBody(data);
+        if (body) {
+          return body
+            .replace(/\r/g, '')
+            .split(/\n{2,}|\n+/)
+            .map(p => p.trim())
+            .filter(Boolean)
+            .join('\n\n');
+        }
+      } catch {}
+    }
+
+    const nextCandidate = extractNextDataCandidate();
+    if (nextCandidate) {
+      const md = htmlToMarkdown(nextCandidate);
+      if (md && md.trim().length > 800) return md;
+    }
+
+    const m = html.match(/<div[^>]*class=["'][^"']*ArticleBody-articleBody[^"']*["'][^>]*>[\s\S]*?<\/div>/i);
+    articleHtml = m ? m[0] : '';
+    if (!articleHtml) {
+      const mm = html.match(/<div[^>]*class=["'][^"']*Group-container[^"']*["'][^>]*>[\s\S]*?<\/div>/i);
+      articleHtml = mm ? mm[0] : '';
+    }
   }
   
   // Universal fallback: if specific extraction failed (empty or too short), try to use the full body
@@ -683,6 +928,54 @@ function normalizeMarkdownSource(md: string, source: string) {
     } catch {
       return raw;
     }
+  };
+
+  const ensureParagraphBreaks = (input: string) => {
+    let t = (input || '').replace(/\r/g, '').trim();
+    if (!t) return '';
+    if (!t.includes('\n') && t.includes('\\n')) t = t.replace(/\\r/g, '').replace(/\\n/g, '\n');
+    t = t.replace(/\n{3,}/g, '\n\n').trim();
+    const nlp = (t.match(/\n\n/g) || []).length;
+    if (t.length < 2500) return t;
+    if (nlp >= 4) return t;
+
+    const splitSentences = (text: string) => {
+      const out: string[] = [];
+      const re = /[^.!?\n]+[.!?]+(?:\s+|$)|[^\n]+(?:\n+|$)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const seg = String(m[0] || '').trim();
+        if (!seg) continue;
+        out.push(seg);
+      }
+      return out.length ? out : [text];
+    };
+
+    const chunks: string[] = [];
+    let cur = '';
+    const pushCur = () => {
+      const v = cur.trim();
+      if (v) chunks.push(v);
+      cur = '';
+    };
+
+    const parts = t.includes('\n') ? t.split(/\n+/).map(x => x.trim()).filter(Boolean) : splitSentences(t);
+    for (const part of parts) {
+      const next = cur ? `${cur} ${part}` : part;
+      if (next.length >= 520) {
+        pushCur();
+        cur = part;
+        continue;
+      }
+      cur = next;
+      if (/[.!?]\s*$/.test(cur) && cur.length >= 220) {
+        pushCur();
+      }
+    }
+    pushCur();
+
+    if (chunks.length <= 1) return t;
+    return chunks.join('\n\n').trim();
   };
   const fixSmartPunctuationArtifacts = (input: string) => {
     let s = input || '';
@@ -730,6 +1023,46 @@ function normalizeMarkdownSource(md: string, source: string) {
   };
 
   s = fixSmartPunctuationArtifacts(fixUtf8Mojibake(s));
+  if (source === 'Aeon Essays') {
+    s = s
+      .replace(/\n\s*#{4,}[^\n]*\n/gi, '\n')
+      .replace(/^\s*Skip\s+to\s+content\s*$/gmi, '')
+      .replace(/^\s*Share\s+(this|on)\s+.*$/gmi, '')
+      .replace(/^\s*(Facebook|Twitter|Email|LinkedIn)\s*$/gmi, '')
+      .replace(/^\s*(Read\s+more|Further\s+reading|Related\s+articles|More\s+from\s+Aeon)\s*:?\s*$/gmi, '')
+      .replace(/\n{3,}/g, '\n\n');
+
+    const paras = s.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    const isFooter = (p: string) => {
+      const x = p.replace(/\s+/g, ' ').trim();
+      if (!x) return true;
+      if (/^Support\s+Aeon/i.test(x)) return true;
+      if (/Aeon\s+is\s+(a|an)\s+(registered\s+)?charity/i.test(x)) return true;
+      if (/Copyright\s+.*Aeon/i.test(x)) return true;
+      if (/^Published\s+on\s+/i.test(x)) return true;
+      if (/^By\s+[A-Z]/.test(x) && x.length < 80) return false;
+      if (/^Sign\s+up\s+to\s+/i.test(x)) return true;
+      if (/^Subscribe\s+/i.test(x)) return true;
+      if (/^Newsletter\s*$/i.test(x)) return true;
+      if (/^Tags?:/i.test(x)) return true;
+      if (/^Topics?:/i.test(x)) return true;
+      if (/^Related:/i.test(x)) return true;
+      if (/^Read\s+more\s+at\s+aeon\.co/i.test(x)) return true;
+      return false;
+    };
+    while (paras.length > 0 && isFooter(paras[paras.length - 1])) paras.pop();
+
+    const dedup = new Set<string>();
+    const unique: string[] = [];
+    for (const p of paras) {
+      const key = p.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!key) continue;
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      unique.push(p);
+    }
+    s = ensureParagraphBreaks(fixSmartPunctuationArtifacts(fixUtf8Mojibake(unique.join('\n\n'))));
+  }
   if (source === 'The Guardian') {
     s = s
       .replace(/[\u2018\u2019]/g, "'")
@@ -780,10 +1113,92 @@ function normalizeMarkdownSource(md: string, source: string) {
 }
 
 export function cleanContent(text: string, url?: string) {
-  return text;
+  const s = String(text || '');
+  const u = String(url || '');
+  const source = u.includes('aeon.co')
+    ? 'Aeon Essays'
+    : u.includes('theguardian.com')
+      ? 'The Guardian'
+      : u.includes('cnbc.com')
+        ? 'CNBC Technology'
+        : '';
+  if (!source) return s;
+  return normalizeMarkdownSource(s, source);
 }
 
 export async function fetchArticleMarkdown(url: string, source: string) {
+  if (source === 'Aeon Essays') {
+    try {
+      const u = new URL(url);
+      if (u.hostname.includes('aeon.co') && u.pathname.startsWith('/videos/')) {
+        const html = await fetchHtml(url);
+        if (html) {
+          const vo = extractVideoObjectFromLdJson(html);
+          let md = vo ? aeonVideoMarkdownFromVideoObject(vo) : '';
+          const title = String(vo?.name || '').trim();
+          const embedUrl = String(vo?.embedUrl || '').trim();
+          const videoId = (() => {
+            const m = embedUrl.match(/\/embed\/([^?&#/]+)/i);
+            return m?.[1] || '';
+          })();
+          const vtt = videoId ? await tryYoutubeTranscript(videoId) : '';
+          const transcript = vtt ? vttToPlainText(vtt) : '';
+          if (transcript) {
+            md = `${md}\n\n## Transcript\n\n${transcript}`.trim();
+          }
+          const norm = md ? normalizeMarkdownSource(md, source) : '';
+          if (norm && isContentValid(norm, source)) return { markdown: norm, title };
+        }
+      }
+    } catch {}
+
+    const sel = selectorFor(url, source);
+    const a = await fetchRawMarkdown(url, sel);
+    const fb = await domainFallbackMarkdown(url);
+
+    const score = (md: string) => {
+      const s = (md || '').toString();
+      if (!s.trim()) return -1e9;
+      const nlp = (s.match(/\n\n/g) || []).length;
+      const img = (s.match(/!\[[^\]]*\]\([^\)]+\)/g) || []).length;
+      const lines = (s.match(/\n/g) || []).length;
+      return s.length + nlp * 600 + img * 2500 + Math.min(2000, lines * 10);
+    };
+
+    const cand: Array<{ md: string; title: string }> = [];
+    if (a.markdown) cand.push({ md: normalizeMarkdownSource(a.markdown, source), title: a.title || '' });
+    if (fb) cand.push({ md: normalizeMarkdownSource(fb, source), title: '' });
+    cand.sort((x, y) => score(y.md) - score(x.md));
+    const best = cand[0];
+    if (!best) return { markdown: '', title: a.title || '' };
+    if (!isContentValid(best.md, source)) return { markdown: '', title: a.title || '' };
+    return { markdown: best.md, title: best.title || a.title || '' };
+  }
+
+  if (source === 'CNBC Technology') {
+    const sel = selectorFor(url, source);
+    const a = await fetchRawMarkdown(url, sel);
+    const fb = await domainFallbackMarkdown(url);
+
+    const score = (md: string) => {
+      const s = (md || '').toString();
+      if (!s.trim()) return -1e9;
+      if (/403\s+Forbidden|Access\s+Denied|verify\s+you\s+are\s+human|enable\s+javascript/i.test(s)) return -1e9;
+      const nlp = (s.match(/\n\n/g) || []).length;
+      const lines = (s.match(/\n/g) || []).length;
+      return s.length + nlp * 800 + Math.min(2000, lines * 10);
+    };
+
+    const cand: Array<{ md: string; title: string }> = [];
+    if (a.markdown) cand.push({ md: normalizeMarkdownSource(a.markdown, source), title: a.title || '' });
+    if (fb) cand.push({ md: normalizeMarkdownSource(fb, source), title: '' });
+    cand.sort((x, y) => score(y.md) - score(x.md));
+    const best = cand[0];
+    if (!best) return { markdown: '', title: a.title || '' };
+    if (!isContentValid(best.md, source)) return { markdown: '', title: a.title || '' };
+    return { markdown: best.md, title: best.title || a.title || '' };
+  }
+
   if (source === 'The Guardian') {
     const api = await tryGuardianContentApi(url);
     if (api && isContentValid(api.markdown, source)) {
@@ -857,7 +1272,7 @@ export async function fetchAndStoreArticles() {
       const newItems = candidates.filter(c => !existingLinks.has(c.link));
       
       let successCount = 0;
-      const fullFetch = source.name === 'The Guardian';
+      const fullFetch = source.name === 'The Guardian' || source.name === 'Aeon Essays';
       const lightweight = !fullFetch;
       for (const item of newItems) {
         if (successCount >= quota) break;

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { cleanContent } from "@/lib/crawler";
+import { cleanContent, fetchArticleMarkdown } from "@/lib/crawler";
 import { supabase } from "@/lib/supabase";
 
 export async function POST(req: Request) {
@@ -14,6 +14,33 @@ export async function POST(req: Request) {
 
     // Jina Reader 支持直接拼接 URL，建议加上 http 前缀如果缺失
     const targetUrl = url.startsWith("http") ? url : `https://${url}`;
+
+    if (article_id) {
+      const { data } = await supabase
+        .from('articles')
+        .select('id, title, source, original_url, raw_markdown, content')
+        .eq('id', article_id)
+        .maybeSingle();
+      const source = String(data?.source || '');
+      const originalUrl = String(data?.original_url || targetUrl);
+      const existing = String(data?.raw_markdown || data?.content || '');
+      if (source === 'Aeon Essays' && originalUrl.includes('aeon.co/videos/') && existing.trim().length >= 120) {
+        return NextResponse.json({ title: data?.title || 'Untitled', content: existing });
+      }
+
+      if (source === 'Aeon Essays' && originalUrl.includes('aeon.co/videos/')) {
+        const fetched = await fetchArticleMarkdown(originalUrl, source);
+        const md = String(fetched?.markdown || '');
+        const title = String(fetched?.title || data?.title || 'Untitled');
+        if (md && md.length >= 120) {
+          await supabase
+            .from('articles')
+            .update({ title, content: md, raw_markdown: md })
+            .eq('id', article_id);
+          return NextResponse.json({ title, content: md });
+        }
+      }
+    }
     const readerUrl = `https://r.jina.ai/${targetUrl}`;
 
     // 尝试获取 JSON 格式以获得更准确的元数据

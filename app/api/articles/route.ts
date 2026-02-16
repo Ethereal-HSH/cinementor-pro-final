@@ -7,7 +7,7 @@ export async function GET() {
   try {
     const { data, error } = await supabase
       .from("articles")
-      .select("id,title,source,published_at,summary,status")
+      .select("id,title,source,published_at,summary,summary_zh,status")
       .order("published_at", { ascending: false })
       .limit(200);
 

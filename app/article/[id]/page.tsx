@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { decodeHTMLEntities } from "@/lib/utils";
@@ -17,16 +17,35 @@ interface Paragraph {
   captionZh?: string | null;
   captionShow?: boolean;
   captionLoading?: boolean;
+  type?: 'text' | 'heading' | 'embed' | 'meta';
+  headingLevel?: number;
+  embedUrl?: string | null;
+  watchUrl?: string | null;
 }
 
 export default function ArticlePage() {
   const { id } = useParams();
+  const router = useRouter();
   const [title, setTitle] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
+  const [originalUrl, setOriginalUrl] = useState<string | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
+  const [summaryZh, setSummaryZh] = useState<string | null>(null);
   const [paragraphs, setParagraphs] = useState<Paragraph[]>([]);
   const [selectedSentence, setSelectedSentence] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [repairing, setRepairing] = useState(false);
+
+  const handleBack = () => {
+    try {
+      if (typeof window !== 'undefined' && window.history.length > 1) {
+        router.back();
+        return;
+      }
+    } catch {}
+    router.push('/');
+  };
   const [fullAnalysis, setFullAnalysis] = useState<{
     translation_md: string;
     vocab_md: string;
@@ -89,7 +108,22 @@ export default function ArticlePage() {
   };
 
   const splitIntoParagraphBlocks = (text: string) => {
-    const s = (text || "").replace(/\r/g, "").trim();
+    let s = (text || "").replace(/\r/g, "");
+    if (!s.trim()) return [];
+
+    if (!s.includes("\n") && s.includes("\\n")) {
+      s = s.replace(/\\r/g, "").replace(/\\n/g, "\n");
+    }
+
+    if (/<\s*br\b|<\s*p\b|<\s*\/\s*p\s*>/i.test(s)) {
+      s = s
+        .replace(/<\s*br\s*\/?>/gi, "\n")
+        .replace(/<\s*p\b[^>]*>/gi, "")
+        .replace(/<\s*\/\s*p\s*>/gi, "\n\n")
+        .replace(/<[^>]+>/g, "");
+    }
+
+    s = s.trim();
     if (!s) return [];
 
     const byBlank = s
@@ -97,7 +131,51 @@ export default function ArticlePage() {
       .map(p => p.trim())
       .filter(Boolean);
     if (byBlank.length > 1) return byBlank;
-    if (!s.includes("\n")) return [s];
+    if (!s.includes("\n")) {
+      const decoded = decodeHTMLEntities(s);
+      const sentences = splitIntoSentences(decoded);
+      const paras: string[] = [];
+      let buf = "";
+      const flush = () => {
+        const t = buf.trim();
+        if (t) paras.push(t);
+        buf = "";
+      };
+
+      for (const sent of sentences) {
+        const piece = (sent || "").trim();
+        if (!piece) continue;
+        if (!buf) {
+          buf = piece;
+          continue;
+        }
+        const next = `${buf} ${piece}`;
+        if (next.length > 800) {
+          flush();
+          buf = piece;
+          continue;
+        }
+        buf = next;
+      }
+      flush();
+
+      if (paras.length === 1 && paras[0].length > 1200) {
+        const long = paras[0];
+        const chunks: string[] = [];
+        let i = 0;
+        while (i < long.length) {
+          const targetEnd = Math.min(long.length, i + 800);
+          const slice = long.slice(i, targetEnd);
+          const lastSpace = slice.lastIndexOf(" ");
+          const end = lastSpace > 400 ? i + lastSpace : targetEnd;
+          chunks.push(long.slice(i, end).trim());
+          i = end;
+        }
+        return chunks.filter(Boolean);
+      }
+
+      return paras.length > 0 ? paras : [s];
+    }
 
     const lines = s
       .split(/\n+/)
@@ -181,12 +259,16 @@ export default function ArticlePage() {
 
       setTitle(data.title);
       setSource(data.source);
+      setOriginalUrl(data.original_url || null);
+      setSummary(data.summary || null);
+      setSummaryZh((data as any).summary_zh || null);
 
       // 优先使用 raw_markdown，如果为空则回退到 content
       let content = data.raw_markdown || data.content || "";
       
       // 如果两者都为空或太短，尝试实时抓取
-      if (!content || content.length < 500) {
+      const allowShort = data.source === 'Aeon Essays' && String(data.original_url || '').includes('aeon.co/videos/');
+      if (!content || (content.length < 500 && !allowShort)) {
         try {
           const res = await fetch("/api/read", {
             method: "POST",
@@ -235,6 +317,64 @@ export default function ArticlePage() {
           continue;
         }
 
+        const h = p.match(/^(#{1,6})\s+(.+)$/);
+        if (h) {
+          processedParas.push({
+            id: `para-${processedParas.length}`,
+            original: h[2] || p,
+            sentences: [],
+            translation: null,
+            show: false,
+            loading: false,
+            isImage: false,
+            type: 'heading',
+            headingLevel: h[1].length
+          });
+          continue;
+        }
+
+        const embed = p.match(/^Embed:\s*(https?:\/\/(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/[^\s]+)\s*$/i);
+        if (embed?.[1]) {
+          const rawUrl = embed[1];
+          const safeEmbedUrl = rawUrl
+            .replace('://youtube.com/embed/', '://www.youtube-nocookie.com/embed/')
+            .replace('://www.youtube.com/embed/', '://www.youtube-nocookie.com/embed/')
+            .replace('://www.youtube-nocookie.com/embed/', '://www.youtube-nocookie.com/embed/');
+          const videoId = (() => {
+            const m = safeEmbedUrl.match(/\/embed\/([^?&#/]+)/i);
+            return m?.[1] || '';
+          })();
+          const watchUrl = videoId ? `https://youtu.be/${videoId}` : rawUrl;
+          processedParas.push({
+            id: `para-${processedParas.length}`,
+            original: p,
+            sentences: [],
+            translation: null,
+            show: false,
+            loading: false,
+            isImage: false,
+            type: 'embed',
+            embedUrl: safeEmbedUrl,
+            headingLevel: undefined,
+            watchUrl
+          });
+          continue;
+        }
+
+        if (/^Duration:\s*/i.test(p) || /^Watch\s+on\s+Aeon\b/i.test(p)) {
+          processedParas.push({
+            id: `para-${processedParas.length}`,
+            original: p,
+            sentences: [],
+            translation: null,
+            show: false,
+            loading: false,
+            isImage: false,
+            type: 'meta'
+          });
+          continue;
+        }
+
         processedParas.push({
           id: `para-${processedParas.length}`,
           original: p,
@@ -242,11 +382,25 @@ export default function ArticlePage() {
           translation: null,
           show: false,
           loading: false,
-          isImage: false
+          isImage: false,
+          type: 'text'
         });
       }
 
       setParagraphs(processedParas);
+
+      if (data.summary && !(data as any).summary_zh) {
+        try {
+          const res = await fetch('/api/admin/ensure-summary-zh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [articleId] })
+          });
+          const j = await res.json().catch(() => null);
+          const zh = j?.results?.[articleId];
+          if (zh) setSummaryZh(zh);
+        } catch {}
+      }
 
       // 更新状态为已读 (如果需要)
       if (data.status === 'unread') {
@@ -275,6 +429,29 @@ export default function ArticlePage() {
       alert("加载文章失败");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRepairArticle = async () => {
+    if (!id) return;
+    setRepairing(true);
+    try {
+      const res = await fetch('/api/admin/repair-article', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      await fetchArticle(id as string);
+      alert(`修复完成：${data.action || 'ok'}（${data.beforeLen} → ${data.afterLen}）`);
+    } catch (e) {
+      console.error(e);
+      alert('修复失败，请稍后重试');
+    } finally {
+      setRepairing(false);
     }
   };
 
@@ -324,7 +501,7 @@ export default function ArticlePage() {
 
   const handleToggleParagraph = async (idx: number) => {
     const para = paragraphs[idx];
-    if (para.isImage) return; // 图片无需翻译
+    if (para.isImage || para.type !== 'text') return;
 
     if (para.translation) {
       setParagraphs(prev => prev.map((p, i) => i === idx ? { ...p, show: !p.show } : p));
@@ -357,20 +534,42 @@ export default function ArticlePage() {
       <section>
         <header className="mb-10">
           <div className="mb-4">
-            <Link
-              href="/"
+            <button
+              type="button"
               aria-label="返回主界面"
               title="返回主界面"
               className="inline-flex items-center justify-center w-8 h-8 rounded-full text-gray-400 hover:text-black focus:outline-none focus-visible:ring-1 focus-visible:ring-gold"
+              onClick={handleBack}
             >
               <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M15 6l-6 6 6 6" />
                 <path d="M3 12h12" />
               </svg>
-            </Link>
+            </button>
           </div>
-          <div className="text-sm text-gray-500 mb-2 uppercase tracking-widest">{source}</div>
+          <div className="flex items-center justify-between gap-4 mb-2">
+            <div className="text-sm text-gray-500 uppercase tracking-widest">{source}</div>
+            <button
+              aria-label={repairing ? '修复中...' : '修复该文章'}
+              title={repairing ? '修复中...' : '修复该文章'}
+              className={`px-3 py-1.5 rounded text-xs font-sans border transition ${repairing ? 'cursor-wait opacity-70 border-gray-200 text-gray-400' : 'border-gray-200 text-gray-600 hover:text-black hover:border-gray-400'}`}
+              onClick={handleRepairArticle}
+              disabled={repairing}
+            >
+              {repairing ? '修复中...' : '修复'}
+            </button>
+          </div>
           <h1 className="text-4xl font-bold mb-8 leading-tight text-gray-900">{decodeHTMLEntities(title || "")}</h1>
+          {summary && summary.trim() && (
+            <div className="-mt-6 mb-3 text-sm text-gray-600 font-sans leading-relaxed">
+              {decodeHTMLEntities(summary)}
+            </div>
+          )}
+          {summaryZh && summaryZh.trim() && (
+            <div className="mb-8 text-sm text-gray-700 font-sans leading-relaxed">
+              {decodeHTMLEntities(summaryZh)}
+            </div>
+          )}
           
           <div className="flex items-center justify-between border-b border-gray-200 pb-4 mb-6">
              <span className="text-sm text-gray-500">共 {paragraphs.length} 个段落</span>
@@ -430,7 +629,52 @@ export default function ArticlePage() {
                       )}
                   </figure>
               ) : (
-                <>
+                para.type === 'heading' ? (
+                  para.headingLevel && para.headingLevel <= 2 ? (
+                    <h2 className="text-2xl font-bold text-gray-900 mt-10 mb-4">{decodeHTMLEntities(para.original)}</h2>
+                  ) : (
+                    <h3 className="text-xl font-semibold text-gray-900 mt-8 mb-3">{decodeHTMLEntities(para.original)}</h3>
+                  )
+                ) : para.type === 'embed' && para.embedUrl ? (
+                  <div className="my-6">
+                    <div className="relative w-full overflow-hidden rounded-lg bg-black" style={{ paddingTop: '56.25%' }}>
+                      <iframe
+                        src={para.embedUrl}
+                        title="Video"
+                        className="absolute inset-0 w-full h-full"
+                        referrerPolicy="strict-origin-when-cross-origin"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                      />
+                    </div>
+                    <div className="mt-2 text-sm text-gray-600 font-sans">
+                      <a
+                        href={para.watchUrl || para.embedUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline"
+                      >
+                        无法播放？点这里在新窗口打开
+                      </a>
+                      {originalUrl && (
+                        <>
+                          <span className="mx-2">·</span>
+                          <a
+                            href={originalUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline"
+                          >
+                            在 Aeon 打开
+                          </a>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : para.type === 'meta' ? (
+                  <div className="text-sm text-gray-600 font-sans">{decodeHTMLEntities(para.original)}</div>
+                ) : (
+                  <>
                   <p className="leading-loose text-gray-900 mb-3">
                     {para.sentences.map((s, sIdx) => (
                       <span
@@ -471,7 +715,8 @@ export default function ArticlePage() {
                       {para.translation || (para.loading ? "译文生成中..." : "暂无译文")}
                     </div>
                   )}
-                </>
+                  </>
+                )
               )}
             </div>
           ))}
