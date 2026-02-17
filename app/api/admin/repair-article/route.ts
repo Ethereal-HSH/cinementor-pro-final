@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { fetchArticleMarkdown } from '@/lib/crawler';
+import { cleanContent, fetchArticleMarkdown } from '@/lib/crawler';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -408,8 +408,28 @@ export async function POST(request: Request) {
     const beforeNlp = countParagraphBreaks(before);
 
     const minLen = minLenFor(source, url);
-    const bad = looksBadFormatting(before, source) || before.length < minLen;
-    if (!force && !bad) {
+    const badBefore = looksBadFormatting(before, source) || before.length < minLen;
+
+    let next = before;
+    let action = '';
+    if (source === 'The Guardian') {
+      const washed = normalizeGuardianStoredMarkdown(before);
+      if (washed && washed !== before) {
+        next = washed;
+        action = 'washed';
+      }
+    }
+
+    if (source === 'Aeon Essays') {
+      const cleaned = cleanContent(next, url);
+      if (cleaned && cleaned !== next) {
+        next = cleaned;
+        action = action ? `${action}+cleaned` : 'cleaned';
+      }
+    }
+
+    const bad = looksBadFormatting(next, source) || next.length < minLen;
+    if (!force && !badBefore && !bad && next === before) {
       return NextResponse.json({
         success: true,
         id,
@@ -422,16 +442,6 @@ export async function POST(request: Request) {
         afterNl: beforeNl,
         afterNlp: beforeNlp
       });
-    }
-
-    let next = before;
-    let action = '';
-    if (source === 'The Guardian') {
-      const washed = normalizeGuardianStoredMarkdown(before);
-      if (washed && washed !== before) {
-        next = washed;
-        action = 'washed';
-      }
     }
 
     if (force || needsParagraphize(next)) {

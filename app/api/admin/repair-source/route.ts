@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { fetchArticleMarkdown } from '@/lib/crawler';
+import { cleanContent, fetchArticleMarkdown } from '@/lib/crawler';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -45,6 +45,7 @@ export async function POST(request: Request) {
     const force = Boolean(body?.force);
     const dryRun = Boolean(body?.dryRun);
     const recrawl = body?.recrawl === undefined ? true : Boolean(body?.recrawl);
+    const clean = body?.clean === undefined ? true : Boolean(body?.clean);
     const deleteOnFail = Boolean(body?.deleteOnFail);
     const hardDeleteOnFail = Boolean(body?.hardDeleteOnFail);
     const retryAfterDelete = body?.retryAfterDelete === undefined ? true : Boolean(body?.retryAfterDelete);
@@ -64,6 +65,7 @@ export async function POST(request: Request) {
     let bad = 0;
     let recrawled = 0;
     let updated = 0;
+    let cleaned = 0;
     let failed = 0;
     let purged = 0;
     let deleted = 0;
@@ -92,14 +94,63 @@ export async function POST(request: Request) {
 
         const url = String(row.original_url || '');
         const before = String(row.raw_markdown || row.content || '');
-        const isBad = force || looksBadFormatting(before, source, url);
-        if (!isBad) {
+        let next = before;
+        let localAction = '';
+        if (clean && source === 'Aeon Essays') {
+          const washed = cleanContent(next, url);
+          if (washed && washed !== next) {
+            next = washed;
+            localAction = localAction ? `${localAction}+cleaned` : 'cleaned';
+            cleaned++;
+          }
+        }
+
+        const stillBad = force || looksBadFormatting(next, source, url);
+        const localChanged = next !== before;
+
+        if (!stillBad) {
           ok++;
+          if (localChanged && !dryRun) {
+            const { error: uerr0 } = await supabase
+              .from('articles')
+              .update({ raw_markdown: next })
+              .eq('id', row.id);
+            if (!uerr0) {
+              updated++;
+              if (samples.length < 20) {
+                samples.push({
+                  id: row.id,
+                  url: String(row.original_url || ''),
+                  action: localAction || 'cleaned',
+                  beforeLen: before.length,
+                  afterLen: next.length
+                });
+              }
+            }
+          } else if (localChanged && dryRun && samples.length < 20) {
+            samples.push({
+              id: row.id,
+              url: String(row.original_url || ''),
+              action: localAction ? `would_${localAction}` : 'would_clean',
+              beforeLen: before.length,
+              afterLen: next.length
+            });
+          }
           continue;
         }
-        bad++;
 
-        if (!recrawl) continue;
+        bad++;
+        if (!recrawl) {
+          if (localChanged && !dryRun) {
+            const { error: uerr0 } = await supabase
+              .from('articles')
+              .update({ raw_markdown: next })
+              .eq('id', row.id);
+            if (!uerr0) updated++;
+          }
+          continue;
+        }
+
         const fetched = await fetchArticleMarkdown(url, source);
         const md = String(fetched?.markdown || '');
         const title = String(fetched?.title || '').trim();
@@ -224,6 +275,7 @@ export async function POST(request: Request) {
       dryRun,
       force,
       recrawl,
+      clean,
       deleteOnFail,
       hardDeleteOnFail,
       retryAfterDelete,
@@ -233,6 +285,7 @@ export async function POST(request: Request) {
       bad,
       recrawled,
       updated,
+      cleaned,
       failed,
       purged,
       deleted,

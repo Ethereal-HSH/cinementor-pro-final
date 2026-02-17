@@ -155,21 +155,21 @@ export default function HomePage() {
   const handleRepairSource = async (source: string) => {
     const src = String(source || '').trim();
     if (!src) return;
-    const ok = confirm(`将对“${src}”执行批量清洗/重抓，可能耗时 1-3 分钟。继续吗？`);
+    const ok = confirm(`将对“${src}”执行批量修复（优先清洗，必要时重抓），可能耗时 1-3 分钟。继续吗？`);
     if (!ok) return;
     setRepairingSource(true);
     try {
       const res = await fetch('/api/admin/repair-source', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: src, limit: 500, force: true, dryRun: false, recrawl: true })
+        body: JSON.stringify({ source: src, limit: 500, force: false, dryRun: false, recrawl: true, clean: true })
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.success) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
       await fetchArticles();
-      alert(`批量清洗完成：updated=${data.updated}, failed=${data.failed}, scanned=${data.scanned}`);
+      alert(`批量修复完成：cleaned=${data.cleaned ?? 0}, recrawled=${data.recrawled ?? 0}, updated=${data.updated}, failed=${data.failed}, scanned=${data.scanned}`);
     } catch (e) {
       console.error(e);
       alert('批量清洗失败，请稍后重试');
@@ -206,6 +206,9 @@ export default function HomePage() {
                 )}
                 {refreshing ? "正在采集..." : "刷新外刊"}
             </button>
+            <div className="self-center text-xs text-gray-500 font-sans">
+              每天北京时间 08:00 自动更新
+            </div>
         </div>
       </header>
 

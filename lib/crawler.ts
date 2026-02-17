@@ -1026,9 +1026,12 @@ function normalizeMarkdownSource(md: string, source: string) {
   if (source === 'Aeon Essays') {
     s = s
       .replace(/\n\s*#{4,}[^\n]*\n/gi, '\n')
+      .replace(/^\s*i\s*$/gmi, '')
       .replace(/^\s*Skip\s+to\s+content\s*$/gmi, '')
       .replace(/^\s*Share\s+(this|on)\s+.*$/gmi, '')
       .replace(/^\s*(Facebook|Twitter|Email|LinkedIn)\s*$/gmi, '')
+      .replace(/^\s*Listen\s+to\s+this\s+essay\s*$/gmi, '')
+      .replace(/^\s*\d+\s+minute\s+listen\s*$/gmi, '')
       .replace(/^\s*(Read\s+more|Further\s+reading|Related\s+articles|More\s+from\s+Aeon)\s*:?\s*$/gmi, '')
       .replace(/\n{3,}/g, '\n\n');
 
@@ -1054,8 +1057,20 @@ function normalizeMarkdownSource(md: string, source: string) {
 
     const dedup = new Set<string>();
     const unique: string[] = [];
-    for (const p of paras) {
-      const key = p.replace(/\s+/g, ' ').trim().toLowerCase();
+    for (let i = 0; i < paras.length; i++) {
+      let p = paras[i];
+      if (i === 0 && /\|\s*Aeon\s+Essays/i.test(p) && /!\[[^\]]*\]\([^\)]+\)/.test(p)) {
+        p = p.replace(/^.*?\|\s*Aeon\s+Essays\s*/i, '');
+      }
+      p = p.replace(/\+\s*BIO\b/gi, '').replace(/\s+\+\s*$/g, '').trim();
+
+      const x = p.replace(/\s+/g, ' ').trim();
+      if (!x) continue;
+      if (/^i$/i.test(x)) continue;
+      if (/^Listen\s+to\s+this\s+essay$/i.test(x)) continue;
+      if (/^\d+\s+minute\s+listen$/i.test(x)) continue;
+
+      const key = x.toLowerCase();
       if (!key) continue;
       if (dedup.has(key)) continue;
       dedup.add(key);

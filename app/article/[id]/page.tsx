@@ -333,32 +333,53 @@ export default function ArticlePage() {
           continue;
         }
 
-        const embed = p.match(/^Embed:\s*(https?:\/\/(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/[^\s]+)\s*$/i);
+        const embed = p.match(/^Embed:\s*(https?:\/\/[^\s]+)\s*$/i);
         if (embed?.[1]) {
           const rawUrl = embed[1];
-          const safeEmbedUrl = rawUrl
-            .replace('://youtube.com/embed/', '://www.youtube-nocookie.com/embed/')
-            .replace('://www.youtube.com/embed/', '://www.youtube-nocookie.com/embed/')
-            .replace('://www.youtube-nocookie.com/embed/', '://www.youtube-nocookie.com/embed/');
-          const videoId = (() => {
-            const m = safeEmbedUrl.match(/\/embed\/([^?&#/]+)/i);
-            return m?.[1] || '';
-          })();
-          const watchUrl = videoId ? `https://youtu.be/${videoId}` : rawUrl;
-          processedParas.push({
-            id: `para-${processedParas.length}`,
-            original: p,
-            sentences: [],
-            translation: null,
-            show: false,
-            loading: false,
-            isImage: false,
-            type: 'embed',
-            embedUrl: safeEmbedUrl,
-            headingLevel: undefined,
-            watchUrl
-          });
-          continue;
+          let safeEmbedUrl: string | null = null;
+          let watchUrl: string | null = null;
+          try {
+            const u = new URL(rawUrl);
+            const host = u.hostname.toLowerCase();
+            const path = u.pathname;
+            const isYoutubeEmbed = (host === 'youtube.com' || host === 'www.youtube.com' || host === 'www.youtube-nocookie.com' || host === 'youtube-nocookie.com')
+              && path.startsWith('/embed/');
+            if (isYoutubeEmbed) {
+              safeEmbedUrl = rawUrl
+                .replace('://youtube.com/embed/', '://www.youtube-nocookie.com/embed/')
+                .replace('://www.youtube.com/embed/', '://www.youtube-nocookie.com/embed/')
+                .replace('://www.youtube-nocookie.com/embed/', '://www.youtube-nocookie.com/embed/')
+                .replace('://youtube-nocookie.com/embed/', '://www.youtube-nocookie.com/embed/');
+              const videoId = (() => {
+                const m = safeEmbedUrl.match(/\/embed\/([^?&#/]+)/i);
+                return m?.[1] || '';
+              })();
+              watchUrl = videoId ? `https://youtu.be/${videoId}` : rawUrl;
+            }
+
+            const vimeoMatch = host === 'player.vimeo.com' ? path.match(/^\/video\/(\d+)/) : null;
+            if (!safeEmbedUrl && vimeoMatch?.[1]) {
+              safeEmbedUrl = rawUrl;
+              watchUrl = `https://vimeo.com/${vimeoMatch[1]}`;
+            }
+          } catch {}
+
+          if (safeEmbedUrl) {
+            processedParas.push({
+              id: `para-${processedParas.length}`,
+              original: p,
+              sentences: [],
+              translation: null,
+              show: false,
+              loading: false,
+              isImage: false,
+              type: 'embed',
+              embedUrl: safeEmbedUrl,
+              headingLevel: undefined,
+              watchUrl
+            });
+            continue;
+          }
         }
 
         if (/^Duration:\s*/i.test(p) || /^Watch\s+on\s+Aeon\b/i.test(p)) {
@@ -533,12 +554,12 @@ export default function ArticlePage() {
     <main className="max-w-6xl mx-auto px-6 py-10 font-serif grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-12">
       <section>
         <header className="mb-10">
-          <div className="mb-4">
+          <div className="fixed top-4 left-4 z-50">
             <button
               type="button"
               aria-label="返回主界面"
               title="返回主界面"
-              className="inline-flex items-center justify-center w-8 h-8 rounded-full text-gray-400 hover:text-black focus:outline-none focus-visible:ring-1 focus-visible:ring-gold"
+              className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-white/90 backdrop-blur border border-gray-200 shadow-sm text-gray-500 hover:text-black hover:border-gray-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-gold"
               onClick={handleBack}
             >
               <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -643,7 +664,7 @@ export default function ArticlePage() {
                         title="Video"
                         className="absolute inset-0 w-full h-full"
                         referrerPolicy="strict-origin-when-cross-origin"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                         allowFullScreen
                       />
                     </div>
