@@ -2,7 +2,7 @@ export {};
 
 function htmlToMarkdown(html: string) {
   let s = html;
-  
+}
   const pickFromSrcset = (srcset: string) => {
     const parts = (srcset || '').split(',').map(p => p.trim()).filter(Boolean);
     let bestUrl = '';
