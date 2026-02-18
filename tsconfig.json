@@ -40,6 +40,8 @@
     "**/*.tsx"
   ],
   "exclude": [
-    "node_modules"
-  ]
+  "node_modules",
+  "debug_*.ts",
+  "debug_*.tsx"
+]
 }
