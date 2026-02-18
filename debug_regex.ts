@@ -1,3 +1,4 @@
+export {};
 
 function htmlToMarkdown(html: string) {
   let s = html;
